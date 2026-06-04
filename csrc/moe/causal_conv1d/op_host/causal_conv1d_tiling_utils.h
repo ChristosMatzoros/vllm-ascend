@@ -89,7 +89,7 @@ struct FnHostPlan {
 constexpr int64_t DIM_ALIGN_BYTES = 32;
 constexpr int64_t BF16_FP16_ELEM_BYTES = 2;
 constexpr int64_t DIM_ALIGN_ELEMS = DIM_ALIGN_BYTES / BF16_FP16_ELEM_BYTES;
-constexpr int64_t MAX_DIM_TILE_SIZE = 4096;
+constexpr int64_t MAX_DIM_TILE_SIZE = 2048;  // output-ring scatter kernel fits its UB at 2048; dim splits into even single-pass tiles (no sub-tiling)
 constexpr int64_t FN_UB_RESERVED_BYTES = 512;
 constexpr int64_t RING_SLOT_CNT = 5;
 constexpr int64_t FN_OUT_SLOT_CNT = 2;

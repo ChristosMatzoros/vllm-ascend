@@ -11,7 +11,7 @@
 
  #ifndef CAUSAL_CONV1D_FN_TASKS_H
  #define CAUSAL_CONV1D_FN_TASKS_H
- 
+
  struct FnDirectBlockTask {
      bool valid = false;
      int32_t tokenTileId = 0;
@@ -21,7 +21,7 @@
      int32_t channelStart = 0;
      int32_t baseDimSize = 0;
  };
- 
+
  __aicore__ inline FnDirectBlockTask ResolveFnDirectBlockTask(int32_t blockIdx, int32_t tokenBlockCnt, int32_t tokenBlockSize,
                                                               int32_t cuSeqlen, int32_t baseDimCnt, int32_t baseDim,
                                                               int32_t dim)
@@ -31,40 +31,40 @@
          dim <= 0) {
          return task;
      }
- 
+
      const int64_t phase1Grid = static_cast<int64_t>(tokenBlockCnt) * baseDimCnt;
      if (phase1Grid <= 0 || static_cast<int64_t>(blockIdx) >= phase1Grid) {
          return task;
      }
- 
+
      task.tokenTileId = blockIdx / baseDimCnt;
      task.baseDimIdx = blockIdx % baseDimCnt;
      task.channelStart = task.baseDimIdx * baseDim;
      if (task.channelStart >= dim) {
          return task;
      }
- 
+
      task.baseDimSize = (task.channelStart + baseDim <= dim) ? baseDim : (dim - task.channelStart);
      task.tokenStart = task.tokenTileId * tokenBlockSize;
      if (task.tokenStart >= cuSeqlen) {
          return task;
      }
- 
+
      const int32_t tokenEndRaw = task.tokenStart + tokenBlockSize;
      task.tokenEnd = (tokenEndRaw <= cuSeqlen) ? tokenEndRaw : cuSeqlen;
      if (task.baseDimSize <= 0 || task.tokenEnd <= task.tokenStart) {
          return {};
      }
- 
+
      task.valid = true;
      return task;
  }
- 
+
  __aicore__ inline bool IsFnInitStateSnapshotOwnerBlock(const FnDirectBlockTask &task)
  {
      return task.valid && task.tokenTileId == 0;
  }
- 
+
  template <CAUSAL_CONV1D_TEMPLATE_ARGS>
  __aicore__ inline int32_t CAUSAL_CONV1D_CLASS::FindVarlenSeqByToken(int32_t tokenIdx) const
  {
@@ -81,7 +81,7 @@
      }
      return left;
  }
- 
+
  template <CAUSAL_CONV1D_TEMPLATE_ARGS>
  __aicore__ inline bool CAUSAL_CONV1D_CLASS::ResolveExplicitTokenTileSeqRange(int32_t tokenTileId, int32_t &startSeq,
                                                                                int32_t &endSeq) const
@@ -93,7 +93,7 @@
      endSeq = static_cast<int32_t>(tilingData_->tokenTileEndSeq[tokenTileId]);
      return (startSeq >= 0) && (endSeq >= startSeq);
  }
- 
+
  template <CAUSAL_CONV1D_TEMPLATE_ARGS>
  __aicore__ inline void CAUSAL_CONV1D_CLASS::InitRingSeqSplit(int32_t seq, int32_t cacheIdx, bool hasInit,
                                                               int32_t seqStart, int32_t tileStart, int32_t tileLen,
@@ -109,12 +109,12 @@
      bool hasVectorInit = false;
      const int64_t stateBaseOffset = static_cast<int64_t>(cacheIdx) * stateLen * dim + channelStart;
      int64_t xHistoryOffset = static_cast<int64_t>(historyStartTok) * dim + channelStart;
- 
+
      for (int32_t i = 0; i < ringStart; ++i) {
          Duplicate(ring[i * MAX_BLOCK_DIM], static_cast<T>(0), baseDim);
          hasVectorInit = true;
      }
- 
+
      for (int32_t i = 0, srcTok = historyStartTok; i < historyCount; ++i, ++srcTok, xHistoryOffset += dim) {
          LocalTensor<T> histSlot = ring[(ringStart + i) * MAX_BLOCK_DIM];
          if (srcTok >= seqStart) {
@@ -136,7 +136,7 @@
              hasVectorInit = true;
          }
      }
- 
+
      if (hasGmHistoryCopy) {
          SetFlag<HardEvent::MTE2_V>(stateMte2ToVEvent_);
          WaitFlag<HardEvent::MTE2_V>(stateMte2ToVEvent_);
@@ -144,34 +144,40 @@
      if (hasVectorInit) {
          PipeBarrier<PIPE_V>();
      }
- 
+
      if (tileLen > 0) {
          const int32_t slot0 = SlotCurr(0);
          const int64_t xOffset = static_cast<int64_t>(tileStart) * dim + channelStart;
          DataCopy(ring[slot0 * MAX_BLOCK_DIM], xGm[xOffset], baseDim);
          SetFlag<HardEvent::MTE2_V>(inputMte2ToVEvent_[slot0]);
      }
- 
+
      if (tileLen > 1) {
          SetFlag<HardEvent::V_MTE2>(inputVToMte2Event_);
      }
  }
- 
+
  template <CAUSAL_CONV1D_TEMPLATE_ARGS>
  __aicore__ inline void CAUSAL_CONV1D_CLASS::ProcessFnChunk(int32_t seq, int32_t cacheIdx, bool hasInit,
                                                             int32_t seqStart, int32_t seqLen, int32_t chunkStart,
                                                             int32_t chunkLen, int32_t channelStart, int32_t baseDim,
                                                             int32_t dim)
  {
-     LoadWeightAndBias(channelStart, baseDim);
-     InitRingSeqSplit(seq, cacheIdx, hasInit, seqStart, chunkStart, chunkLen, channelStart, baseDim, dim);
- 
-     RunSeq(chunkStart, chunkLen, channelStart, baseDim, dim);
- 
-     MaybeWriteBackSeqSplitTailChunk(chunkStart, chunkLen, seqStart, seqLen, cacheIdx, channelStart, baseDim, dim);
-     DrainTaskMte3();
+     // baseDim (= blockTask.baseDimSize) can be up to the host's baseDim
+     // (4096 for dim=6144). Buffers are sized at MAX_BLOCK_DIM=2048, so process the
+     // channel range in <=MAX_BLOCK_DIM sub-tiles. Channels are independent (depthwise
+     // conv) so this is bit-exact; DrainTaskMte3 between sub-tiles frees the input ring.
+     for (int32_t sub = 0; sub < baseDim; sub += MAX_BLOCK_DIM) {
+         const int32_t subDim = ((baseDim - sub) < MAX_BLOCK_DIM) ? (baseDim - sub) : MAX_BLOCK_DIM;
+         const int32_t subChannel = channelStart + sub;
+         LoadWeightAndBias(subChannel, subDim);
+         InitRingSeqSplit(seq, cacheIdx, hasInit, seqStart, chunkStart, chunkLen, subChannel, subDim, dim);
+         RunSeq(chunkStart, chunkLen, subChannel, subDim, dim);
+         MaybeWriteBackSeqSplitTailChunk(chunkStart, chunkLen, seqStart, seqLen, cacheIdx, subChannel, subDim, dim);
+         DrainTaskMte3();
+     }
  }
- 
+
  template <CAUSAL_CONV1D_TEMPLATE_ARGS>
  __aicore__ inline void
  CAUSAL_CONV1D_CLASS::MaybeWriteBackSeqSplitTailChunk(int32_t chunkStart, int32_t chunkLen, int32_t seqStart,
@@ -181,50 +187,55 @@
      if (chunkStart + chunkLen != seqStart + seqLen) {
          return;
      }
- 
+
      DrainTaskMte3();
      WriteBackState(cacheIdx, chunkLen, channelStart, baseDim, dim);
  }
- 
+
  template <CAUSAL_CONV1D_TEMPLATE_ARGS>
  __aicore__ inline void CAUSAL_CONV1D_CLASS::PrefetchInitStatesToWorkspace(int32_t channelStart, int32_t baseDimSize)
  {
      if (tilingData_->hasInitStateWorkspace == 0) {
          return;
      }
- 
+
      const int32_t dim = tilingData_->dim;
      const int32_t historyCount = static_cast<int32_t>(tilingData_->width - 1);
      const int32_t batch = tilingData_->batch;
      const bool hasCacheIndices = (tilingData_->hasCacheIndices != 0);
      const bool hasInitialStateMode = (tilingData_->hasInitialStateMode != 0);
      LocalTensor<T> tmpBuf = inBuf.Get<T>()[0 * MAX_BLOCK_DIM];
- 
+
      for (int32_t seq = 0; seq < batch; ++seq) {
          if (!ResolveSeqHasInit(seq, hasInitialStateMode)) {
              continue;
          }
- 
+
          int32_t cacheIdx = 0;
          if (!ResolveSeqCacheIndex(seq, hasCacheIndices, cacheIdx)) {
              continue;
          }
- 
+
          const int64_t stateBaseOffset = static_cast<int64_t>(cacheIdx) * tilingData_->stateLen * dim + channelStart;
          const int64_t snapshotBaseOffset = static_cast<int64_t>(seq) * historyCount * dim + channelStart;
          for (int32_t statePos = 0; statePos < historyCount; ++statePos) {
              const int64_t stateOffset = stateBaseOffset + static_cast<int64_t>(statePos) * dim;
              const int64_t snapshotOffset = snapshotBaseOffset + static_cast<int64_t>(statePos) * dim;
-             DataCopy(tmpBuf, convStatesGm[stateOffset], baseDimSize);
-             SetFlag<HardEvent::MTE2_MTE3>(initSnapshotMte2ToMte3Event_);
-             WaitFlag<HardEvent::MTE2_MTE3>(initSnapshotMte2ToMte3Event_);
-             DataCopy(initStateWorkspaceGm_[snapshotOffset], tmpBuf, baseDimSize);
-             SetFlag<HardEvent::MTE3_MTE2>(initSnapshotMte3ToMte2Event_);
-             WaitFlag<HardEvent::MTE3_MTE2>(initSnapshotMte3ToMte2Event_);
+             // tmpBuf (inBuf slot 0) is MAX_BLOCK_DIM=2048 wide; baseDimSize
+             // can be up to 4096, so copy in <=MAX_BLOCK_DIM sub-tiles.
+             for (int32_t sub = 0; sub < baseDimSize; sub += MAX_BLOCK_DIM) {
+                 const int32_t subDim = ((baseDimSize - sub) < MAX_BLOCK_DIM) ? (baseDimSize - sub) : MAX_BLOCK_DIM;
+                 DataCopy(tmpBuf, convStatesGm[stateOffset + sub], subDim);
+                 SetFlag<HardEvent::MTE2_MTE3>(initSnapshotMte2ToMte3Event_);
+                 WaitFlag<HardEvent::MTE2_MTE3>(initSnapshotMte2ToMte3Event_);
+                 DataCopy(initStateWorkspaceGm_[snapshotOffset + sub], tmpBuf, subDim);
+                 SetFlag<HardEvent::MTE3_MTE2>(initSnapshotMte3ToMte2Event_);
+                 WaitFlag<HardEvent::MTE3_MTE2>(initSnapshotMte3ToMte2Event_);
+             }
          }
      }
  }
- 
+
  template <CAUSAL_CONV1D_TEMPLATE_ARGS>
  __aicore__ inline void CAUSAL_CONV1D_CLASS::ProcessVarlenTokenTiled()
  {
@@ -239,7 +250,7 @@
      const bool hasCacheIndices = (tilingData_->hasCacheIndices != 0);
      const bool hasInitialStateMode = (tilingData_->hasInitialStateMode != 0);
      const bool isVarlenMode = (tilingData_->inputMode == 0);
- 
+
      const int32_t blockIdx = static_cast<int32_t>(GetBlockIdx());
      const auto blockTask = ResolveFnDirectBlockTask(blockIdx, tokenBlockCnt, tokenBlockSize, cuSeqlen, baseDimCnt,
                                                      baseDim, dim);
@@ -252,7 +263,7 @@
      if (!blockTask.valid) {
          return;
      }
- 
+
      int32_t seq = 0;
      int32_t seqUpperBound = batch;
      if (isVarlenMode) {
@@ -262,7 +273,7 @@
      } else {
          seq = (seqLen > 0) ? (blockTask.tokenStart / seqLen) : 0;
      }
- 
+
      int32_t cursor = blockTask.tokenStart;
      while (cursor < blockTask.tokenEnd && seq < seqUpperBound) {
          int32_t seqStart = 0;
@@ -279,29 +290,29 @@
              ++seq;
              continue;
          }
- 
+
          const int32_t tileEnd = (blockTask.tokenEnd <= curSeqEnd) ? blockTask.tokenEnd : curSeqEnd;
          const int32_t tileLen = tileEnd - cursor;
          if (tileLen <= 0) {
              ++seq;
              continue;
          }
- 
+
          int32_t cacheIdx = 0;
          if (!ResolveSeqCacheIndex(seq, hasCacheIndices, cacheIdx)) {
              cursor = tileEnd;
              ++seq;
              continue;
          }
- 
+
          const bool hasInit = ResolveSeqHasInit(seq, hasInitialStateMode);
          ProcessFnChunk(seq, cacheIdx, hasInit, seqStart, curSeqLen, cursor, tileLen, blockTask.channelStart,
                         blockTask.baseDimSize, dim);
- 
+
          cursor = tileEnd;
          ++seq;
      }
  }
- 
+
  #endif
- 
+

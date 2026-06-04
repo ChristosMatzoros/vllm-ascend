@@ -21,8 +21,14 @@
 namespace NsCausalConv1dCommon {
 
 constexpr int32_t MAX_WIDTH = 4;
-constexpr int32_t MAX_BLOCK_DIM = 4096;
+// 4096 -> 2048. The host hands the FN kernel baseDim=4096 (dim=6144,
+// TOKEN_DIM_CO_SPLIT), so ProcessFnChunk sub-tiles each task into <=MAX_BLOCK_DIM
+// channel chunks. Halving MAX_BLOCK_DIM frees UB for the FP32 output-accumulator ring.
+constexpr int32_t MAX_BLOCK_DIM = 2048;
 constexpr int32_t RING_SLOTS = 5;
+// depth of the FP32 output-accumulator ring (must be >= MAX_WIDTH so the
+// <=4 in-flight partial outputs occupy distinct slots; extra slack is harmless).
+constexpr int32_t OUT_RING_SLOTS = 6;
 
 __aicore__ inline int32_t SlotCurr(int32_t t)
 {
@@ -37,6 +43,12 @@ __aicore__ inline int32_t SlotHist(int32_t t, int32_t i)
 __aicore__ inline int32_t SlotPrefetch(int32_t t)
 {
     return (t + 4) % RING_SLOTS;
+}
+
+// ring slot holding the partial accumulator for output position p.
+__aicore__ inline int32_t OutRingSlot(int32_t p)
+{
+    return p % OUT_RING_SLOTS;
 }
 
 struct CalcBufLayout {
