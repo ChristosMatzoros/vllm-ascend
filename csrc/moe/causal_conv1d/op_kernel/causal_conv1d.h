@@ -117,6 +117,8 @@ protected:
     static constexpr bool kHasCompileTimeWidth =
         (runModeKey == CAUSAL_CONV1D_TPL_RUN_MODE_FN) && (kTemplateWidth >= 2) && (kTemplateWidth <= MAX_WIDTH);
     static constexpr FnExecutionPlan kFnExecutionPlan = static_cast<FnExecutionPlan>(fnPlanKey);
+    static constexpr int32_t typeSizeRatio = sizeof(float) / sizeof(T);
+    static_assert(sizeof(float) % sizeof(T) == 0);
 
     __aicore__ inline void ResetRuntimeState(const CausalConv1dTilingData *tilingData);
     __aicore__ inline void InitSharedBuffersAndEvents();
@@ -168,10 +170,13 @@ protected:
 
 protected:
     TPipe pipe;
-    TBuf<QuePosition::VECIN> inBuf;
-    TBuf<QuePosition::VECOUT> outBuf;
-    TBuf<QuePosition::VECCALC> calcBuf;
+    TBuf<QuePosition::VECIN>        inBuf;
+    TBuf<QuePosition::VECOUT>      outBuf;
+    TBuf<QuePosition::VECCALC>  weightBuf;
+    TBuf<QuePosition::VECCALC>    biasBuf;
+    TBuf<QuePosition::VECCALC>    ringBuf;
 
+    // Todo events
     TEventID weightBiasMte2ToVEvent_;
     TEventID stateMte2ToVEvent_;
     TEventID inputMte2ToVEvent_[RING_SLOTS];
@@ -214,12 +219,15 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::ResetRuntimeState(const CausalConv1d
 template <CAUSAL_CONV1D_TEMPLATE_ARGS>
 __aicore__ inline void CAUSAL_CONV1D_CLASS::InitSharedBuffersAndEvents()
 {
-    pipe.InitBuffer(inBuf, RING_SLOTS * MAX_BLOCK_DIM * sizeof(T));
-    pipe.InitBuffer(outBuf, 2 * MAX_BLOCK_DIM * sizeof(T));
-    pipe.InitBuffer(calcBuf, (MAX_WIDTH + 4) * MAX_BLOCK_DIM * sizeof(float));
+    pipe.InitBuffer(inBuf,      2          * MAX_BLOCK_DIM * sizeof(T));
+    pipe.InitBuffer(outBuf,     2          * MAX_BLOCK_DIM * sizeof(T));
+    pipe.InitBuffer(weightBuf,  MAX_WIDTH  * MAX_BLOCK_DIM * sizeof(float));
+    pipe.InitBuffer(biasBuf,    1          * MAX_BLOCK_DIM * sizeof(float));
+    pipe.InitBuffer(ringBuf,    RING_SLOTS * MAX_BLOCK_DIM * sizeof(float));
     AllocEvents();
 }
 
+// Todo events
 template <CAUSAL_CONV1D_TEMPLATE_ARGS>
 __aicore__ inline void CAUSAL_CONV1D_CLASS::AllocEvents()
 {
@@ -283,19 +291,19 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::LoadWeightAndBias(int32_t channelSta
     const int32_t width = static_cast<int32_t>(tilingData_->width);
     const int32_t jStart = MAX_WIDTH - width;
     const bool hasBias = HasBias();
-    auto cl = CalcBufLayout::FromCalcBuf(calcBuf);
-    LocalTensor<float> &weightF = cl.weightF;
-    LocalTensor<float> &biasF = cl.biasF;
+    
+    LocalTensor<float> weightF = weightBuf.Get<float>();
+    LocalTensor<float> biasF = biasBuf.Get<float>();
+    
     LocalTensor<T> weightT;
     LocalTensor<T> biasT;
-
     if constexpr (!std::is_same<T, float>::value) {
         weightT = weightF.ReinterpretCast<T>();
         biasT = biasF.ReinterpretCast<T>();
     }
 
     for (int32_t j = 0; j < jStart; ++j) {
-        Duplicate(weightF[j * MAX_BLOCK_DIM], 0.0f, baseDim);
+        Duplicate(weightF[j * MAX_BLOCK_DIM], 0.0f, baseDim); // Can perhaps be removed
     }
 
     for (int32_t j = 0; j < width; ++j) {
@@ -305,7 +313,8 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::LoadWeightAndBias(int32_t channelSta
         if constexpr (std::is_same<T, float>::value) {
             DataCopy(weightF[jDst * MAX_BLOCK_DIM], weightGm[weightOffset], baseDim);
         } else {
-            DataCopy(weightT[jDst * MAX_BLOCK_DIM * 2 + MAX_BLOCK_DIM], weightGm[weightOffset], baseDim);
+            static_assert(typeSizeRatio == 2);
+            DataCopy(weightT[jDst * MAX_BLOCK_DIM * typeSizeRatio + MAX_BLOCK_DIM], weightGm[weightOffset], baseDim);
         }
     }
 
@@ -313,10 +322,12 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::LoadWeightAndBias(int32_t channelSta
         if constexpr (std::is_same<T, float>::value) {
             DataCopy(biasF, biasGm[channelStart], baseDim);
         } else {
+            static_assert(typeSizeRatio == 2);
             DataCopy(biasT[MAX_BLOCK_DIM], biasGm[channelStart], baseDim);
         }
     }
 
+    // Can be optimised with a flag for each Tile
     SetFlag<HardEvent::MTE2_V>(weightBiasMte2ToVEvent_);
     WaitFlag<HardEvent::MTE2_V>(weightBiasMte2ToVEvent_);
 
@@ -329,11 +340,11 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::LoadWeightAndBias(int32_t channelSta
         if (hasBias) {
             Cast(biasF, biasT[MAX_BLOCK_DIM], RoundMode::CAST_NONE, baseDim);
         }
-        PipeBarrier<PIPE_V>();
+        PipeBarrier<PIPE_V>(); // Only one time call - ok
     }
 
     if (!hasBias) {
-        Duplicate(biasF, 0.0f, baseDim);
+        Duplicate(biasF, 0.0f, baseDim); // Remove?
     }
 }
 
