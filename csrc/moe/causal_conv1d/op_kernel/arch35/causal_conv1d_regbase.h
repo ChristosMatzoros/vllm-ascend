@@ -25,9 +25,9 @@ constexpr uint16_t V_LENGTH = VECTOR_REG_WIDTH / sizeof(float);
 constexpr CastTrait castTraitB16ToB32 = {
     RegLayout::ZERO, SatMode::UNKNOWN, MaskMergeMode::ZEROING, RoundMode::UNKNOWN};
 
-    // TODO
-template <typename T, bool hasActivation>
-__aicore__ inline void ComputeFnRollingOutputRegbase(LocalTensor<T> ring, LocalTensor<float> currF, 
+
+template <bool hasActivation>
+__aicore__ inline void ComputeFnRollingOutputRegbase(LocalTensor<float> ring, LocalTensor<float> currF, 
     LocalTensor<float> state0F, LocalTensor<float> weightF, uint32_t dataCount) 
 {
     __ubuf__ T* ringAddr = (__ubuf__ T*)ring.GetPhyAddr();
@@ -38,7 +38,6 @@ __aicore__ inline void ComputeFnRollingOutputRegbase(LocalTensor<T> ring, LocalT
     uint16_t colLoopTimes = static_cast<uint16_t>(Ceil(dataCount, V_LENGTH));
     __VEC_SCOPE__
     {
-        RegTensor<T> ring;
         RegTensor<float> currF;
         RegTensor<float> state0F;
         RegTensor<float> weightF;
@@ -46,10 +45,9 @@ __aicore__ inline void ComputeFnRollingOutputRegbase(LocalTensor<T> ring, LocalT
         MaskReg pregLoop;
         for (uint16_t j = 0; j < colLoopTimes; j++) {
             pregLoop = UpdateMask<float>(dataCount);
-            DataCopy<T, LoadDist::DIST_UNPACK_B16>(ring, ringAddr + j * V_LENGTH);
+            DataCopy(currF, ringAddr + j * V_LENGTH);
             DataCopy(state0F, state0FAddr + j * V_LENGTH);
             DataCopy(weightF, weightFAddr + j * V_LENGTH);
-            Cast<float, T, castTraitB16ToB32>(currF, ring, pregLoop);
             Mul(currF, currF, weightF, pregLoop);
             Add(state0F, state0F, currF, pregLoop);
             if constexpr (hasActivation) {
