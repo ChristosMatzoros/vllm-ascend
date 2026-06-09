@@ -417,7 +417,7 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::RunSeq(int32_t start, int32_t len, i
 
         bool accInitialized = false;
         if (hasBias) {
-            Adds(accF, biasF, 0.0f, baseDim);
+            DataCopy(accF, biasF, basedim);
             PipeBarrier<PIPE_V>();
             accInitialized = true;
         }
