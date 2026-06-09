@@ -25,6 +25,7 @@ constexpr uint16_t V_LENGTH = VECTOR_REG_WIDTH / sizeof(float);
 constexpr CastTrait castTraitB16ToB32 = {
     RegLayout::ZERO, SatMode::UNKNOWN, MaskMergeMode::ZEROING, RoundMode::UNKNOWN};
 
+    // TODO
 template <typename T, bool hasActivation>
 __aicore__ inline void ComputeFnRollingOutputRegbase(LocalTensor<T> ring, LocalTensor<float> currF, 
     LocalTensor<float> state0F, LocalTensor<float> weightF, uint32_t dataCount) 
@@ -64,6 +65,7 @@ __aicore__ inline void ComputeFnRollingOutputRegbase(LocalTensor<T> ring, LocalT
     }
 }
 
+// TODO
 template <typename T>
 static __simd_vf__ inline void AdvanceFnLocalPartialsWidthTwo(__ubuf__ T* ringAddr, __ubuf__ float* weight0FAddr, 
     __ubuf__ float* state0FAddr, uint32_t dataCount, uint16_t colLoopTimes)
@@ -144,6 +146,7 @@ static __simd_vf__ inline void AdvanceFnLocalPartialsWidthFour(__ubuf__ T* ringA
     }
 }
 
+// TODO
 template <typename T, int32_t kTemplateWidth>
 __aicore__ inline void AdvanceFnLocalPartialsRegbase(LocalTensor<T> ring, LocalTensor<float> weightF, 
     LocalTensor<float> state0F, LocalTensor<float> state1F, LocalTensor<float> state2F, uint32_t dataCount, 
