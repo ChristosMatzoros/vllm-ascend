@@ -597,7 +597,7 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::AdvanceFnLocalPartials(int32_t slotC
     constexpr int32_t w0Idx = MAX_WIDTH - kTemplateWidth;
 
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
-AdvanceFnLocalPartialsRegbase<T, kTemplateWidth>(ring[slotCurr * MAX_BLOCK_DIM], weightF[w0Idx * MAX_BLOCK_DIM], 
+AdvanceFnLocalPartialsRegbase<kTemplateWidth>(ring[slotCurr * MAX_BLOCK_DIM], weightF[w0Idx * MAX_BLOCK_DIM], 
     state0F, state1F, state2F, baseDim, MAX_BLOCK_DIM);
 #else
 Cast(currF, ring[slotCurr * MAX_BLOCK_DIM], RoundMode::CAST_NONE, baseDim);
