@@ -383,11 +383,6 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::InitRing(int32_t cacheIdx, bool hasI
         const int32_t slot0 = SlotCurr(0);
         const int64_t xOffset = static_cast<int64_t>(start) * dim + channelStart;
         DataCopy(ringT[slot0 * MAX_BLOCK_DIM * 2 + MAX_BLOCK_DIM], xGm[xOffset], baseDim);
-        SetFlag<HardEvent::MTE2_V>(stateMte2ToVEvent_);
-        WaitFlag<HardEvent::MTE2_V>(stateMte2ToVEvent_);
-        Cast(ringF[slot0 * MAX_BLOCK_DIM], ringT[slot0 * MAX_BLOCK_DIM * 2 + MAX_BLOCK_DIM], RoundMode::CAST_NONE, baseDim);
-        PipeBarrier<PIPE_V>();
-
         SetFlag<HardEvent::MTE2_V>(inputMte2ToVEvent_[slot0]);
     }
 
@@ -624,7 +619,6 @@ if constexpr (kTemplateWidth == 2) {
 #endif
 }
 
-// TODO
 template <CAUSAL_CONV1D_TEMPLATE_ARGS>
 __aicore__ inline void CAUSAL_CONV1D_CLASS::RunSeqFnRolling(int32_t start, int32_t len, int32_t channelStart,
                                                             int32_t baseDim, int32_t dim)
@@ -636,7 +630,8 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::RunSeqFnRolling(int32_t start, int32
     auto cl = CalcBufLayout::FromCalcBuf(calcBuf);
     LocalTensor<float> &state0F = cl.tmpF;
     LocalTensor<float> &currF = cl.currF;
-    LocalTensor<T> ring = inBuf.Get<T>();
+    LocalTensor<float> ringF = inBuf.Get<float>();
+    LocalTensor<T> ringT = ringF.ReinterpretCast<T>();
     LocalTensor<T> outT = outBuf.Get<T>();
     const bool hasActivation = HasActivation();
     RestoreFnLocalPartials(baseDim);
@@ -645,12 +640,13 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::RunSeqFnRolling(int32_t start, int32
         const int32_t slotCurr = SlotCurr(t);
 
         WaitFlag<HardEvent::MTE2_V>(inputMte2ToVEvent_[slotCurr]);
+        Cast(ringT[slotCurr * MAX_BLOCK_DIM * 2 + MAX_BLOCK_DIM], ringF[slotCurr * MAX_BLOCK_DIM], RoundMode::CAST_NONE, baseDim);
 
         if (t + 1 < len) {
             const int32_t slotNext = SlotPrefetch(t);
             const int64_t xOffsetNext = static_cast<int64_t>(start + t + 1) * dim + channelStart;
             WaitFlag<HardEvent::V_MTE2>(inputVToMte2Event_);
-            DataCopy(ring[slotNext * MAX_BLOCK_DIM], xGm[xOffsetNext], baseDim);
+            DataCopy(ringT[slotNext * MAX_BLOCK_DIM * 2 + MAX_BLOCK_DIM], xGm[xOffsetNext], baseDim);
             SetFlag<HardEvent::MTE2_V>(inputMte2ToVEvent_[slotNext]);
         }
 
