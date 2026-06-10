@@ -755,9 +755,10 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::WriteBackStateSpec(int32_t cacheIdx,
         return;
     }
 
-    LocalTensor<T> ring = inBuf.Get<T>();
-    LocalTensor<T> buf0 = ring[0 * MAX_BLOCK_DIM];
-    LocalTensor<T> buf1 = ring[1 * MAX_BLOCK_DIM];
+    LocalTensor<float> ringF = inBuf.Get<float>();
+    LocalTensor<T> ringT = ringF.ReinterpretCast<T>();
+    LocalTensor<T> buf0T = ringT[0 * MAX_BLOCK_DIM * 2 + MAX_BLOCK_DIM];
+    LocalTensor<T> buf1T = ringT[1 * MAX_BLOCK_DIM * 2 + MAX_BLOCK_DIM];
 
     if (hasInit) {
         const int32_t srcPos0 = stateTokenOffset + 1;
@@ -766,41 +767,41 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::WriteBackStateSpec(int32_t cacheIdx,
             static_cast<int64_t>(cacheIdx) * stateLen * dim + static_cast<int64_t>(srcPos0) * dim + channelStart;
         const int64_t srcOffset1 =
             static_cast<int64_t>(cacheIdx) * stateLen * dim + static_cast<int64_t>(srcPos1) * dim + channelStart;
-        DataCopy(buf0, convStatesGm[srcOffset0], baseDim);
-        DataCopy(buf1, convStatesGm[srcOffset1], baseDim);
+        DataCopy(buf0T, convStatesGm[srcOffset0], baseDim);
+        DataCopy(buf1T, convStatesGm[srcOffset1], baseDim);
         SetFlag<HardEvent::MTE2_MTE3>(stateShiftMte2ToMte3Event_);
         WaitFlag<HardEvent::MTE2_MTE3>(stateShiftMte2ToMte3Event_);
         const int64_t dstOffset0 =
             static_cast<int64_t>(cacheIdx) * stateLen * dim + static_cast<int64_t>(0) * dim + channelStart;
         const int64_t dstOffset1 =
             static_cast<int64_t>(cacheIdx) * stateLen * dim + static_cast<int64_t>(1) * dim + channelStart;
-        DataCopy(convStatesGm[dstOffset0], buf0, baseDim);
-        DataCopy(convStatesGm[dstOffset1], buf1, baseDim);
+        DataCopy(convStatesGm[dstOffset0], buf0T, baseDim);
+        DataCopy(convStatesGm[dstOffset1], buf1T, baseDim);
         SetFlag<HardEvent::MTE3_MTE2>(stateShiftMte3ToMte2Event_);
         WaitFlag<HardEvent::MTE3_MTE2>(stateShiftMte3ToMte2Event_);
     } else {
-        Duplicate(buf0, static_cast<T>(0), baseDim);
+        Duplicate(buf0T, static_cast<T>(0), baseDim);
         SetFlag<HardEvent::V_MTE3>(stateShiftVToMte3Event_);
         WaitFlag<HardEvent::V_MTE3>(stateShiftVToMte3Event_);
         const int64_t dstOffset0 =
             static_cast<int64_t>(cacheIdx) * stateLen * dim + static_cast<int64_t>(0) * dim + channelStart;
         const int64_t dstOffset1 =
             static_cast<int64_t>(cacheIdx) * stateLen * dim + static_cast<int64_t>(1) * dim + channelStart;
-        DataCopy(convStatesGm[dstOffset0], buf0, baseDim);
-        DataCopy(convStatesGm[dstOffset1], buf0, baseDim);
+        DataCopy(convStatesGm[dstOffset0], buf0T, baseDim);
+        DataCopy(convStatesGm[dstOffset1], buf0T, baseDim);
         SetFlag<HardEvent::MTE3_MTE2>(stateShiftMte3ToMte2Event_);
         WaitFlag<HardEvent::MTE3_MTE2>(stateShiftMte3ToMte2Event_);
     }
 
     const int64_t xOffset0 = static_cast<int64_t>(start) * dim + channelStart;
-    DataCopy(buf0, xGm[xOffset0], baseDim);
+    DataCopy(buf0T, xGm[xOffset0], baseDim);
     SetFlag<HardEvent::MTE2_MTE3>(specWritebackMte2ToMte3Event_[0]);
 
     for (int32_t t = 0; t < len; ++t) {
         const int32_t curr = t & 1;
         const int32_t next = curr ^ 1;
-        LocalTensor<T> currBuf = (curr == 0) ? buf0 : buf1;
-        LocalTensor<T> nextBuf = (next == 0) ? buf0 : buf1;
+        LocalTensor<T> currBuf = (curr == 0) ? buf0T : buf1T;
+        LocalTensor<T> nextBuf = (next == 0) ? buf0T : buf1T;
 
         WaitFlag<HardEvent::MTE2_MTE3>(specWritebackMte2ToMte3Event_[curr]);
 
