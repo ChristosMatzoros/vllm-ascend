@@ -544,7 +544,6 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::RestoreFnLocalPartials(int32_t baseD
     }
 }
 
-// TODO
 template <CAUSAL_CONV1D_TEMPLATE_ARGS>
 __aicore__ inline void CAUSAL_CONV1D_CLASS::ComputeFnRollingOutput(int32_t slotCurr, int32_t baseDim)
 {
@@ -556,7 +555,7 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::ComputeFnRollingOutput(int32_t slotC
     LocalTensor<float> &weightF = cl.weightF;
     LocalTensor<float> &state0F = cl.tmpF;
     LocalTensor<float> &currF = cl.currF;
-    LocalTensor<T> ring = inBuf.Get<T>();
+    LocalTensor<float> ringF = inBuf.Get<float>();
 
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
 const bool hasActivation = HasActivation();
@@ -566,15 +565,13 @@ if (hasActivation) {
     ComputeFnRollingOutputRegbase<false>(ring[slotCurr * MAX_BLOCK_DIM], currF, state0F, weightF[3 * MAX_BLOCK_DIM], baseDim);
 }
 #else
-Cast(currF, ring[slotCurr * MAX_BLOCK_DIM], RoundMode::CAST_NONE, baseDim);
-PipeBarrier<PIPE_V>();
-MulAddDst(state0F, currF, weightF[3 * MAX_BLOCK_DIM], baseDim);
+MulAddDst(state0F, ring[slotCurr * MAX_BLOCK_DIM], weightF[3 * MAX_BLOCK_DIM], baseDim);
 PipeBarrier<PIPE_V>();
 
 const bool hasActivation = HasActivation();
 if (hasActivation) {
-    PipeBarrier<PIPE_V>();
     Silu(currF, state0F, baseDim);
+    PipeBarrier<PIPE_V>();
 }
 #endif
 }
