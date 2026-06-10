@@ -640,7 +640,7 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::RunSeqFnRolling(int32_t start, int32
         const int32_t slotCurr = SlotCurr(t);
 
         WaitFlag<HardEvent::MTE2_V>(inputMte2ToVEvent_[slotCurr]);
-        Cast(ringT[slotCurr * MAX_BLOCK_DIM * 2 + MAX_BLOCK_DIM], ringF[slotCurr * MAX_BLOCK_DIM], RoundMode::CAST_NONE, baseDim);
+        Cast(ringF[slotCurr * MAX_BLOCK_DIM], ringT[slotCurr * MAX_BLOCK_DIM * 2 + MAX_BLOCK_DIM], RoundMode::CAST_NONE, baseDim);
 
         if (t + 1 < len) {
             const int32_t slotNext = SlotPrefetch(t);
