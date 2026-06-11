@@ -717,7 +717,7 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::WriteBackState(int32_t cacheIdx, int
     for (int32_t pos = 0; pos < (width - 1); ++pos) {
         const int32_t tap = (width - 2) - pos;
         const int32_t slot = RetreatRingSlot(lastSlot, tap);
-        Cast(ringT[slot * MAX_BLOCK_DIM * 2 + MAX_BLOCK_DIM], ringF[slot * MAX_BLOCK_DIM], RoundMode::CAST_RINT, baseDim);
+        Cast(ringT[slot * MAX_BLOCK_DIM * 2], ringF[slot * MAX_BLOCK_DIM], RoundMode::CAST_RINT, baseDim);
     }
 
     SetFlag<HardEvent::V_MTE3>(stateWritebackVToMte3Event_);
@@ -727,7 +727,7 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::WriteBackState(int32_t cacheIdx, int
         const int32_t tap = (width - 2) - pos;
         const int32_t slot = RetreatRingSlot(lastSlot, tap);
         const int64_t stateOffset = stateBaseOffset + static_cast<int64_t>(pos) * dim;
-        DataCopy(convStatesGm[stateOffset], ringT[slot * MAX_BLOCK_DIM * 2 + MAX_BLOCK_DIM], baseDim);
+        DataCopy(convStatesGm[stateOffset], ringT[slot * MAX_BLOCK_DIM * 2], baseDim);
     }
 }
 
