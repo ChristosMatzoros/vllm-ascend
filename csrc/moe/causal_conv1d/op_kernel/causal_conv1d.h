@@ -717,7 +717,7 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::WriteBackState(int32_t cacheIdx, int
     for (int32_t pos = 0; pos < (width - 1); ++pos) {
         const int32_t tap = (width - 2) - pos;
         const int32_t slot = RetreatRingSlot(lastSlot, tap);
-        Cast(ringT[slot * MAX_BLOCK_DIM * 2 + MAX_BLOCK_DIM], ringF[slot * MAX_BLOCK_DIM], RoundMode::CAST_NONE, baseDim);
+        Cast(ringT[slot * MAX_BLOCK_DIM * 2 + MAX_BLOCK_DIM], ringF[slot * MAX_BLOCK_DIM], RoundMode::CAST_RINT, baseDim);
     }
 
     SetFlag<HardEvent::V_MTE3>(stateWritebackVToMte3Event_);
@@ -731,7 +731,6 @@ __aicore__ inline void CAUSAL_CONV1D_CLASS::WriteBackState(int32_t cacheIdx, int
     }
 }
 
-// TODO
 template <CAUSAL_CONV1D_TEMPLATE_ARGS>
 __aicore__ inline void CAUSAL_CONV1D_CLASS::WriteBackStateSpec(int32_t cacheIdx, bool hasInit,
                                                             int32_t stateTokenOffset, int32_t start, int32_t len,
