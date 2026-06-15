@@ -24,7 +24,7 @@
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
 #include "arch35/causal_conv1d_regbase.h"
 #endif
-
+ 
  namespace NsCausalConv1d {
  
  using namespace AscendC;
@@ -327,7 +327,7 @@
          for (int32_t j = 0; j < width; ++j) {
              const int32_t jDst = jStart + j;
              Cast(weightF[jDst * MAX_BLOCK_DIM], weightT[jDst * MAX_BLOCK_DIM * 2 + MAX_BLOCK_DIM], RoundMode::CAST_NONE,
-                 baseDim);
+                  baseDim);
          }
          if (hasBias) {
              Cast(biasF, biasT[MAX_BLOCK_DIM], RoundMode::CAST_NONE, baseDim);
@@ -588,34 +588,34 @@
      constexpr int32_t w0Idx = MAX_WIDTH - kTemplateWidth;
  
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
-AdvanceFnLocalPartialsRegbase<kTemplateWidth>(ringF[slotCurr * MAX_BLOCK_DIM], weightF[w0Idx * MAX_BLOCK_DIM], 
-    state0F, state1F, state2F, baseDim, MAX_BLOCK_DIM);
+    AdvanceFnLocalPartialsRegbase<kTemplateWidth>(ringF[slotCurr * MAX_BLOCK_DIM], weightF[w0Idx * MAX_BLOCK_DIM], 
+        state0F, state1F, state2F, baseDim, MAX_BLOCK_DIM);
 #else
-if constexpr (kTemplateWidth == 2) {
-    Mul(state0F, ringF[slotCurr * MAX_BLOCK_DIM], weightF[w0Idx * MAX_BLOCK_DIM], baseDim);
-    PipeBarrier<PIPE_V>();
-} else if constexpr (kTemplateWidth == 3) {
-    Mul(state0F, ringF[slotCurr * MAX_BLOCK_DIM], weightF[(w0Idx + 1) * MAX_BLOCK_DIM], baseDim);
-    PipeBarrier<PIPE_V>();
-    Add(state0F, state0F, state1F, baseDim);
-    PipeBarrier<PIPE_V>();
+    if constexpr (kTemplateWidth == 2) {
+        Mul(state0F, ringF[slotCurr * MAX_BLOCK_DIM], weightF[w0Idx * MAX_BLOCK_DIM], baseDim);
+        PipeBarrier<PIPE_V>();
+    } else if constexpr (kTemplateWidth == 3) {
+        Mul(state0F, ringF[slotCurr * MAX_BLOCK_DIM], weightF[(w0Idx + 1) * MAX_BLOCK_DIM], baseDim);
+        PipeBarrier<PIPE_V>();
+        Add(state0F, state0F, state1F, baseDim);
+        PipeBarrier<PIPE_V>();
 
-    Mul(state1F, ringF[slotCurr * MAX_BLOCK_DIM], weightF[w0Idx * MAX_BLOCK_DIM], baseDim);
-    PipeBarrier<PIPE_V>();
-} else if constexpr (kTemplateWidth == 4) {
-    Mul(state0F, ringF[slotCurr * MAX_BLOCK_DIM], weightF[(w0Idx + 2) * MAX_BLOCK_DIM], baseDim);
-    PipeBarrier<PIPE_V>();
-    Add(state0F, state0F, state1F, baseDim);
-    PipeBarrier<PIPE_V>();
+        Mul(state1F, ringF[slotCurr * MAX_BLOCK_DIM], weightF[w0Idx * MAX_BLOCK_DIM], baseDim);
+        PipeBarrier<PIPE_V>();
+    } else if constexpr (kTemplateWidth == 4) {
+        Mul(state0F, ringF[slotCurr * MAX_BLOCK_DIM], weightF[(w0Idx + 2) * MAX_BLOCK_DIM], baseDim);
+        PipeBarrier<PIPE_V>();
+        Add(state0F, state0F, state1F, baseDim);
+        PipeBarrier<PIPE_V>();
 
-    Mul(state1F, ringF[slotCurr * MAX_BLOCK_DIM], weightF[(w0Idx + 1) * MAX_BLOCK_DIM], baseDim);
-    PipeBarrier<PIPE_V>();
-    Add(state1F, state1F, state2F, baseDim);
-    PipeBarrier<PIPE_V>();
+        Mul(state1F, ringF[slotCurr * MAX_BLOCK_DIM], weightF[(w0Idx + 1) * MAX_BLOCK_DIM], baseDim);
+        PipeBarrier<PIPE_V>();
+        Add(state1F, state1F, state2F, baseDim);
+        PipeBarrier<PIPE_V>();
 
-    Mul(state2F, ringF[slotCurr * MAX_BLOCK_DIM], weightF[w0Idx * MAX_BLOCK_DIM], baseDim);
-    PipeBarrier<PIPE_V>();
-}
+        Mul(state2F, ringF[slotCurr * MAX_BLOCK_DIM], weightF[w0Idx * MAX_BLOCK_DIM], baseDim);
+        PipeBarrier<PIPE_V>();
+    }
 #endif
  }
  
@@ -700,7 +700,7 @@ if constexpr (kTemplateWidth == 2) {
  
  template <CAUSAL_CONV1D_TEMPLATE_ARGS>
  __aicore__ inline void CAUSAL_CONV1D_CLASS::WriteBackState(int32_t cacheIdx, int32_t len, int32_t channelStart,
-                                                         int32_t baseDim, int32_t dim)
+                                                            int32_t baseDim, int32_t dim)
  {
      const int32_t stateLen = tilingData_->stateLen;
      const int32_t width = static_cast<int32_t>(tilingData_->width);
