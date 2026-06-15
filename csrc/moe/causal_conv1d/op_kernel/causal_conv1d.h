@@ -131,12 +131,12 @@
      __aicore__ inline void ComputeFnRollingOutput(int32_t slotCurr, int32_t baseDim);
      __aicore__ inline void AdvanceFnLocalPartials(int32_t slotCurr, int32_t baseDim);
      __aicore__ inline void RunSeqFnRolling(int32_t start, int32_t len, int32_t channelStart, int32_t baseDim,
-                                         int32_t dim);
+                                            int32_t dim);
      __aicore__ inline void RunSeq(int32_t start, int32_t len, int32_t channelStart, int32_t baseDim, int32_t dim);
      __aicore__ inline void WriteBackState(int32_t cacheIdx, int32_t len, int32_t channelStart, int32_t baseDim,
-                                         int32_t dim);
+                                           int32_t dim);
      __aicore__ inline void WriteBackStateSpec(int32_t cacheIdx, bool hasInit, int32_t stateTokenOffset, int32_t start,
-                                             int32_t len, int32_t channelStart, int32_t baseDim, int32_t dim);
+                                               int32_t len, int32_t channelStart, int32_t baseDim, int32_t dim);
      __aicore__ inline void DrainTaskMte3();
      __aicore__ inline void AllocEvents();
      __aicore__ inline void ReleaseEvents();
@@ -149,15 +149,15 @@
      __aicore__ inline bool ResolveSeqCacheIndex(int32_t seq, bool hasCacheIndices, int32_t &cacheIdx) const;
      __aicore__ inline bool ResolveSeqHasInit(int32_t seq, bool hasInitialStateMode) const;
      __aicore__ inline void MaybeWriteBackSeqSplitTailChunk(int32_t chunkStart, int32_t chunkLen, int32_t seqStart,
-                                                         int32_t seqLen, int32_t cacheIdx, int32_t channelStart,
-                                                         int32_t baseDim, int32_t dim);
+                                                            int32_t seqLen, int32_t cacheIdx, int32_t channelStart,
+                                                            int32_t baseDim, int32_t dim);
      __aicore__ inline void ProcessDefault();
      template <int32_t kWindowMode>
      __aicore__ inline void ProcessDefaultByWindowMode();
      __aicore__ inline void ProcessVarlenTokenTiled();
      __aicore__ inline void ProcessFnChunk(int32_t seq, int32_t cacheIdx, bool hasInit, int32_t seqStart,
-                                         int32_t seqLen, int32_t chunkStart, int32_t chunkLen, int32_t channelStart,
-                                         int32_t baseDim, int32_t dim);
+                                           int32_t seqLen, int32_t chunkStart, int32_t chunkLen, int32_t channelStart,
+                                           int32_t baseDim, int32_t dim);
      __aicore__ inline const CausalConv1dTilingData *GetTilingData() const;
      __aicore__ inline bool HasActivation() const;
      __aicore__ inline bool HasBias() const;
@@ -342,8 +342,8 @@
  
  template <CAUSAL_CONV1D_TEMPLATE_ARGS>
  __aicore__ inline void CAUSAL_CONV1D_CLASS::InitRing(int32_t cacheIdx, bool hasInit, int32_t stateTokenOffset,
-                                                     int32_t start, int32_t len, int32_t channelStart,
-                                                     int32_t baseDim, int32_t dim)
+                                                      int32_t start, int32_t len, int32_t channelStart,
+                                                      int32_t baseDim, int32_t dim)
  {
      const int32_t stateLen = tilingData_->stateLen;
      const int32_t width = static_cast<int32_t>(tilingData_->width);
@@ -393,7 +393,7 @@
  
  template <CAUSAL_CONV1D_TEMPLATE_ARGS>
  __aicore__ inline void CAUSAL_CONV1D_CLASS::RunSeq(int32_t start, int32_t len, int32_t channelStart,
-                                                 int32_t baseDim, int32_t dim)
+                                                    int32_t baseDim, int32_t dim)
  {
      if (IsFnRollingFastPathEnabled()) {
          RunSeqFnRolling(start, len, channelStart, baseDim, dim);
@@ -552,23 +552,23 @@
      LocalTensor<float> &currF = cl.currF;
      LocalTensor<float> ringF = inBuf.Get<float>();
  
- #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
- const bool hasActivation = HasActivation();
- if (hasActivation) {
-     ComputeFnRollingOutputRegbase<true>(ringF[slotCurr * MAX_BLOCK_DIM], currF, state0F, weightF[3 * MAX_BLOCK_DIM], baseDim);
- } else {
-     ComputeFnRollingOutputRegbase<false>(ringF[slotCurr * MAX_BLOCK_DIM], currF, state0F, weightF[3 * MAX_BLOCK_DIM], baseDim);
- }
- #else
- MulAddDst(state0F, ringF[slotCurr * MAX_BLOCK_DIM], weightF[3 * MAX_BLOCK_DIM], baseDim);
- PipeBarrier<PIPE_V>();
- 
- const bool hasActivation = HasActivation();
- if (hasActivation) {
-     Silu(currF, state0F, baseDim);
-     PipeBarrier<PIPE_V>();
- }
- #endif
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+    const bool hasActivation = HasActivation();
+    if (hasActivation) {
+        ComputeFnRollingOutputRegbase<true>(ringF[slotCurr * MAX_BLOCK_DIM], currF, state0F, weightF[3 * MAX_BLOCK_DIM], baseDim);
+    } else {
+        ComputeFnRollingOutputRegbase<false>(ringF[slotCurr * MAX_BLOCK_DIM], currF, state0F, weightF[3 * MAX_BLOCK_DIM], baseDim);
+    }
+#else
+    MulAddDst(state0F, ringF[slotCurr * MAX_BLOCK_DIM], weightF[3 * MAX_BLOCK_DIM], baseDim);
+    PipeBarrier<PIPE_V>();
+     
+    const bool hasActivation = HasActivation();
+    if (hasActivation) {
+        Silu(currF, state0F, baseDim);
+        PipeBarrier<PIPE_V>();
+    }
+#endif
  }
  
  template <CAUSAL_CONV1D_TEMPLATE_ARGS>
@@ -587,36 +587,36 @@
      LocalTensor<float> ringF = inBuf.Get<float>();
      constexpr int32_t w0Idx = MAX_WIDTH - kTemplateWidth;
  
- #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
- AdvanceFnLocalPartialsRegbase<kTemplateWidth>(ringF[slotCurr * MAX_BLOCK_DIM], weightF[w0Idx * MAX_BLOCK_DIM], 
-     state0F, state1F, state2F, baseDim, MAX_BLOCK_DIM);
- #else
- if constexpr (kTemplateWidth == 2) {
-     Mul(state0F, ringF[slotCurr * MAX_BLOCK_DIM], weightF[w0Idx * MAX_BLOCK_DIM], baseDim);
-     PipeBarrier<PIPE_V>();
- } else if constexpr (kTemplateWidth == 3) {
-     Mul(state0F, ringF[slotCurr * MAX_BLOCK_DIM], weightF[(w0Idx + 1) * MAX_BLOCK_DIM], baseDim);
-     PipeBarrier<PIPE_V>();
-     Add(state0F, state0F, state1F, baseDim);
-     PipeBarrier<PIPE_V>();
- 
-     Mul(state1F, ringF[slotCurr * MAX_BLOCK_DIM], weightF[w0Idx * MAX_BLOCK_DIM], baseDim);
-     PipeBarrier<PIPE_V>();
- } else if constexpr (kTemplateWidth == 4) {
-     Mul(state0F, ringF[slotCurr * MAX_BLOCK_DIM], weightF[(w0Idx + 2) * MAX_BLOCK_DIM], baseDim);
-     PipeBarrier<PIPE_V>();
-     Add(state0F, state0F, state1F, baseDim);
-     PipeBarrier<PIPE_V>();
- 
-     Mul(state1F, ringF[slotCurr * MAX_BLOCK_DIM], weightF[(w0Idx + 1) * MAX_BLOCK_DIM], baseDim);
-     PipeBarrier<PIPE_V>();
-     Add(state1F, state1F, state2F, baseDim);
-     PipeBarrier<PIPE_V>();
- 
-     Mul(state2F, ringF[slotCurr * MAX_BLOCK_DIM], weightF[w0Idx * MAX_BLOCK_DIM], baseDim);
-     PipeBarrier<PIPE_V>();
- }
- #endif
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+AdvanceFnLocalPartialsRegbase<kTemplateWidth>(ringF[slotCurr * MAX_BLOCK_DIM], weightF[w0Idx * MAX_BLOCK_DIM], 
+    state0F, state1F, state2F, baseDim, MAX_BLOCK_DIM);
+#else
+if constexpr (kTemplateWidth == 2) {
+    Mul(state0F, ringF[slotCurr * MAX_BLOCK_DIM], weightF[w0Idx * MAX_BLOCK_DIM], baseDim);
+    PipeBarrier<PIPE_V>();
+} else if constexpr (kTemplateWidth == 3) {
+    Mul(state0F, ringF[slotCurr * MAX_BLOCK_DIM], weightF[(w0Idx + 1) * MAX_BLOCK_DIM], baseDim);
+    PipeBarrier<PIPE_V>();
+    Add(state0F, state0F, state1F, baseDim);
+    PipeBarrier<PIPE_V>();
+
+    Mul(state1F, ringF[slotCurr * MAX_BLOCK_DIM], weightF[w0Idx * MAX_BLOCK_DIM], baseDim);
+    PipeBarrier<PIPE_V>();
+} else if constexpr (kTemplateWidth == 4) {
+    Mul(state0F, ringF[slotCurr * MAX_BLOCK_DIM], weightF[(w0Idx + 2) * MAX_BLOCK_DIM], baseDim);
+    PipeBarrier<PIPE_V>();
+    Add(state0F, state0F, state1F, baseDim);
+    PipeBarrier<PIPE_V>();
+
+    Mul(state1F, ringF[slotCurr * MAX_BLOCK_DIM], weightF[(w0Idx + 1) * MAX_BLOCK_DIM], baseDim);
+    PipeBarrier<PIPE_V>();
+    Add(state1F, state1F, state2F, baseDim);
+    PipeBarrier<PIPE_V>();
+
+    Mul(state2F, ringF[slotCurr * MAX_BLOCK_DIM], weightF[w0Idx * MAX_BLOCK_DIM], baseDim);
+    PipeBarrier<PIPE_V>();
+}
+#endif
  }
  
  template <CAUSAL_CONV1D_TEMPLATE_ARGS>
@@ -733,8 +733,8 @@
  
  template <CAUSAL_CONV1D_TEMPLATE_ARGS>
  __aicore__ inline void CAUSAL_CONV1D_CLASS::WriteBackStateSpec(int32_t cacheIdx, bool hasInit,
-                                                             int32_t stateTokenOffset, int32_t start, int32_t len,
-                                                             int32_t channelStart, int32_t baseDim, int32_t dim)
+                                                                int32_t stateTokenOffset, int32_t start, int32_t len,
+                                                                int32_t channelStart, int32_t baseDim, int32_t dim)
  {
      const int32_t width = static_cast<int32_t>(tilingData_->width);
      const int32_t stateLen = tilingData_->stateLen;
@@ -827,7 +827,7 @@
  
  template <CAUSAL_CONV1D_TEMPLATE_ARGS>
  __aicore__ inline bool CAUSAL_CONV1D_CLASS::ResolveSeqTaskWindow(int32_t seq, int32_t inputMode, int32_t seqLen,
-                                                                 int32_t &start, int32_t &len) const
+                                                                  int32_t &start, int32_t &len) const
  {
      switch (GetSeqTaskWindowMode(inputMode)) {
          case SEQ_TASK_WINDOW_MODE_VARLEN:
@@ -842,7 +842,7 @@
  template <CAUSAL_CONV1D_TEMPLATE_ARGS>
  template <int32_t kWindowMode>
  __aicore__ inline bool CAUSAL_CONV1D_CLASS::ResolveSeqTaskWindowByMode(int32_t seq, int32_t seqLen, int32_t &start,
-                                                                     int32_t &len) const
+                                                                        int32_t &len) const
  {
      SeqTaskWindow window;
      if constexpr (kWindowMode == SEQ_TASK_WINDOW_MODE_VARLEN) {
@@ -865,7 +865,7 @@
  
  template <CAUSAL_CONV1D_TEMPLATE_ARGS>
  __aicore__ inline bool CAUSAL_CONV1D_CLASS::ResolveSeqCacheIndex(int32_t seq, bool hasCacheIndices,
-                                                                 int32_t &cacheIdx) const
+                                                                  int32_t &cacheIdx) const
  {
      cacheIdx = seq;
      if (!hasCacheIndices) {
@@ -1002,15 +1002,15 @@
  __aicore__ inline bool CAUSAL_CONV1D_CLASS::IsFnRollingFastPathEnabled() const
  {
      return !kIsUpdateMode && (tilingData_ != nullptr) && (kFnExecutionPlan != FN_EXECUTION_PLAN_INVALID) &&
-         (tilingData_->hasNumAcceptedTokens == 0) && !HasBias();
+            (tilingData_->hasNumAcceptedTokens == 0) && !HasBias();
  }
  
  template <CAUSAL_CONV1D_TEMPLATE_ARGS>
  __aicore__ inline bool CAUSAL_CONV1D_CLASS::HasExplicitFnTokenSeqRanges() const
  {
      return !kIsUpdateMode && (tilingData_ != nullptr) && (tilingData_->inputMode == 0) &&
-         (tilingData_->hasExplicitTokenSeqRanges != 0) &&
-         (tilingData_->explicitTokenSeqRangeCount >= tilingData_->tokenBlockCnt);
+            (tilingData_->hasExplicitTokenSeqRanges != 0) &&
+            (tilingData_->explicitTokenSeqRangeCount >= tilingData_->tokenBlockCnt);
  }
  
  template <CAUSAL_CONV1D_TEMPLATE_ARGS>
