@@ -24,23 +24,24 @@ constexpr int32_t MAX_WIDTH = 4;
 constexpr int32_t MAX_BLOCK_DIM = 4096;
 constexpr int32_t RING_SLOTS = 5;
 
+// This function should only be called if one KNOWS that the input is non-negative.
 template <uint32_t N>
 __aicore__ inline constexpr int32_t UnsignedMod(int32_t num) {
     uint32_t uNum = static_cast<uint32_t>(num);
     return uNum % N;
 }
 
-__aicore__ inline int32_t SlotCurr(int32_t t)
+__aicore__ inline constexpr int32_t SlotCurr(int32_t t)
 {
     return UnsignedMod<RING_SLOTS>(t + 3);
 }
 
-__aicore__ inline int32_t SlotHist(int32_t t, int32_t i)
+__aicore__ inline constexpr int32_t SlotHist(int32_t t, int32_t i)
 {
     return UnsignedMod<RING_SLOTS>(t + 3 - i);
 }
 
-__aicore__ inline int32_t SlotPrefetch(int32_t t)
+__aicore__ inline constexpr int32_t SlotPrefetch(int32_t t)
 {
     return UnsignedMod<RING_SLOTS>(t + 4);
 }
