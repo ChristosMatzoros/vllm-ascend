@@ -562,7 +562,7 @@
 #else
     MulAddDst(state0F, ringF[slotCurr * MAX_BLOCK_DIM], weightF[3 * MAX_BLOCK_DIM], baseDim);
     PipeBarrier<PIPE_V>();
-     
+
     const bool hasActivation = HasActivation();
     if (hasActivation) {
         Silu(currF, state0F, baseDim);
@@ -586,7 +586,7 @@
      LocalTensor<float> &currF = cl.currF;
      LocalTensor<float> ringF = inBuf.Get<float>();
      constexpr int32_t w0Idx = MAX_WIDTH - kTemplateWidth;
- 
+
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
     AdvanceFnLocalPartialsRegbase<kTemplateWidth>(ringF[slotCurr * MAX_BLOCK_DIM], weightF[w0Idx * MAX_BLOCK_DIM], 
         state0F, state1F, state2F, baseDim, MAX_BLOCK_DIM);
