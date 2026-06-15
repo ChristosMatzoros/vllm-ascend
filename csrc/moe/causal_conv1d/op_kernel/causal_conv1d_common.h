@@ -27,8 +27,9 @@ constexpr int32_t RING_SLOTS = 5;
 // This function should only be called if one KNOWS that the input is non-negative.
 template <uint32_t N>
 __aicore__ inline constexpr int32_t UnsignedMod(int32_t num) {
-    uint32_t uNum = static_cast<uint32_t>(num);
-    return uNum % N;
+    const uint32_t uNum = static_cast<uint32_t>(num);
+    const int32_t ans = static_cast<int32_t>(uNum % N)
+    return ans;
 }
 
 __aicore__ inline constexpr int32_t SlotCurr(int32_t t)
