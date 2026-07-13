@@ -22,55 +22,29 @@ using namespace Ops::Transformer::OpTiling;
 inline DimTileChoice ChooseCanonicalUpdateBaseDimChoice(gert::TilingContext *context, int64_t batch, int64_t dim,
                                                         uint32_t coreNum)
 {
-    const int64_t candidates[] = {3072, 2048, 1024, 512, 384, 192};
+    constexpr int64_t kMaxChannelsPerTile = MAX_DIM_TILE_SIZE;
+    constexpr int64_t kMinChannelsPerTile = 128;                // Number of vector lanes in FP16 / BF16
 
-    auto chooseOnce = [&](bool requireExactDiv) -> DimTileChoice {
-        DimTileChoice bestOver;
-        int64_t bestOverGap = std::numeric_limits<int64_t>::max();
-        DimTileChoice bestUnder;
-
-        for (int64_t baseDim : candidates) {
-            if (baseDim <= 0) {
-                continue;
-            }
-            if (requireExactDiv && (dim % baseDim != 0)) {
-                continue;
-            }
-
-            const int64_t baseDimCnt = requireExactDiv ? (dim / baseDim) : CeilDivInt64(dim, baseDim);
-            const int64_t gridSize = batch * baseDimCnt;
-            if (gridSize <= 0) {
-                continue;
-            }
-
-            OP_LOGD(context,
-                    "DimTile(update) candidate[%s]: baseDim[%ld], baseDimCnt[%ld], gridSize[%ld], coreNum[%u].",
-                    requireExactDiv ? "exact" : "tail", baseDim, baseDimCnt, gridSize, coreNum);
-            if (gridSize >= static_cast<int64_t>(coreNum)) {
-                const int64_t gap = gridSize - static_cast<int64_t>(coreNum);
-                if (gap < bestOverGap) {
-                    // bestOver = {baseDim, baseDimCnt, gridSize};
-                    bestOver.baseDim = baseDim;
-                    bestOver.baseDimCnt = baseDimCnt;
-                    bestOver.gridSize = gridSize;
-                    bestOverGap = gap;
-                }
-            } else if (gridSize > bestUnder.gridSize ||
-                       (gridSize == bestUnder.gridSize && baseDim < bestUnder.baseDim)) {
-                // bestUnder = {baseDim, baseDimCnt, gridSize};
-                bestUnder.baseDim = baseDim;
-                bestUnder.baseDimCnt = baseDimCnt;
-                bestUnder.gridSize = gridSize;
-            }
-        }
-
-        return (bestOver.baseDim != 0) ? bestOver : bestUnder;
-    };
-
-    DimTileChoice result = chooseOnce(true);
-    if (result.baseDim == 0) {
-        result = chooseOnce(false);
+    if (dim <= 0 || batch <= 0 || coreNum == 0) {
+        return {};
     }
+
+    const int64_t targetTilesPerSeq = std::max<int64_t>(1, CeilDivInt64(static_cast<int64_t>(coreNum), batch));
+
+    int64_t channelTiles = std::max<int64_t>(CeilDivInt64(dim, kMaxChannelsPerTile), targetTilesPerSeq);
+    channelTiles = std::min<int64_t>(channelTiles, CeilDivInt64(dim, kMinChannelsPerTile));
+    channelTiles = std::max<int64_t>(1, channelTiles);
+
+    int64_t channelsPerTile = AlignUpInt64(CeilDivInt64(dim, channelTiles), kMinChannelsPerTile);
+    channelsPerTile = std::min<int64_t>(std::max<int64_t>(channelsPerTile, kMinChannelsPerTile), kMaxChannelsPerTile);
+    channelsPerTile = std::min<int64_t>(channelsPerTile, dim);
+    channelTiles = CeilDivInt64(dim, channelsPerTile);
+
+    DimTileChoice result;
+    result.baseDim = channelsPerTile;
+    result.baseDimCnt = channelTiles;
+    result.gridSize = batch * channelTiles;
+
     OP_LOGD(context, "DimTile(update) chosen: baseDim[%ld], baseDimCnt[%ld], gridSize[%ld].", result.baseDim,
             result.baseDimCnt, result.gridSize);
     return result;
