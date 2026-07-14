@@ -38,7 +38,7 @@ inline DimTileChoice ChooseCanonicalUpdateBaseDimChoice(gert::TilingContext *con
         constexpr double overhead = 10.0; 
 
         int64_t tileNumPerCore = CeilDivInt64(batch * CeilDivInt64(dim, d), static_cast<int64_t>(coreNum));
-        double tileWork = static_cast<double>(seqLength) * static_cast<double>(d) / static_cast<double>(dim) + overhead;
+        double tileWork = static_cast<double>(seqLength) * static_cast<double>(d) + overhead;
 
         double score = static_cast<double>(tileNumPerCore) * tileWork;
         return score;
