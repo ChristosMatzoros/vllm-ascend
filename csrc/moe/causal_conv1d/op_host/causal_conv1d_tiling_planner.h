@@ -15,12 +15,14 @@
 #include "causal_conv1d_tiling_utils.h"
 #include "../op_kernel/causal_conv1d_tiling_data.h"
 
+#include <limits>
+
 namespace optiling::causal_conv1d_host {
 
 using namespace Ops::Transformer::OpTiling;
 
 inline DimTileChoice ChooseCanonicalUpdateBaseDimChoice(gert::TilingContext *context, int64_t batch, int64_t dim,
-                                                        uint32_t coreNum)
+                                                        int64_t seqLength, uint32_t coreNum)
 {
     constexpr int64_t kMaxChannelsPerTile = MAX_DIM_TILE_SIZE;
     constexpr int64_t kMinChannelsPerTile = 128;                // Number of vector lanes in FP16 / BF16
@@ -29,15 +31,43 @@ inline DimTileChoice ChooseCanonicalUpdateBaseDimChoice(gert::TilingContext *con
         return {};
     }
 
-    const int64_t targetTilesPerSeq = std::max<int64_t>(1, CeilDivInt64(static_cast<int64_t>(coreNum), batch));
+    double bestWork = std::numeric_limits<double>::infinity();
+    int64_t channelsPerTile = kMinChannelsPerTile;
 
-    int64_t channelTiles = std::max<int64_t>(CeilDivInt64(dim, kMaxChannelsPerTile), targetTilesPerSeq);
-    channelTiles = std::min<int64_t>(channelTiles, CeilDivInt64(dim, kMinChannelsPerTile));
-    channelTiles = std::max<int64_t>(1, channelTiles);
+    auto scoreFunc = [&](int64_t d) {
+        constexpr double overhead = 10.0; 
 
-    int64_t channelsPerTile = AlignUpInt64(CeilDivInt64(dim, channelTiles), kMinChannelsPerTile);
-    channelsPerTile = std::min<int64_t>(std::max<int64_t>(channelsPerTile, kMinChannelsPerTile), kMaxChannelsPerTile);
-    channelsPerTile = std::min<int64_t>(channelsPerTile, dim);
+        int64_t tileNumPerCore = CeilDivInt64(batch * CeilDivInt64(dim, d), static_cast<int64_t>(coreNum));
+        double tileWork = static_cast<double>(seqLength) * static_cast<double>(d) / static_cast<double>(dim) + overhead;
+
+        double score = static_cast<double>(tileNumPerCore) * tileWork;
+        return score;
+    };
+
+    int64_t d = kMinChannelsPerTile;
+    while (d <= MAX_DIM_TILE_SIZE) {
+        double work = scoreFunc(d);
+        if (work <= bestWork) {
+            bestWork = work;
+            channelsPerTile = d;
+        }
+
+        int64_t k = CeilDivInt64(dim, d);
+        if (k <= 1) break;
+
+        d = CeilDivInt64(dim, k-1);
+        d = CeilDivInt64(d, 128) * 128;
+    }
+
+    // // Alternative (same functionality perhaps faster code)
+    // for (int64_t d = kMinChannelsPerTile; d <= MAX_DIM_TILE_SIZE; d += kMinChannelsPerTile) {
+    //     double work = scoreFunc(d);
+    //     if (work <= bestWork) {
+    //         bestWork = work;
+    //         channelsPerTile = d;
+    //     }
+    // }
+
     channelTiles = CeilDivInt64(dim, channelsPerTile);
 
     DimTileChoice result;
