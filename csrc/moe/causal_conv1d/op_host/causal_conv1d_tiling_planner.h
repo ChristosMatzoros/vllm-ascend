@@ -164,7 +164,7 @@ inline VarlenTokenTileChoice ChooseFnTokenBlockChoice(int64_t cuSeqlen, int64_t 
     }
 
     const int64_t avgSeqLen = std::max<int64_t>(1, cuSeqlen / batch);
-    // Hard safety floor guaranteeing tokenBlockCnt <= tokenCoreBudget (see function doc).
+    // Hard safety floor guaranteeing tokenBlockCnt <= tokenCoreBudget (kernel assumption).
     const int64_t minBlockSize = std::max<int64_t>(1, CeilDivInt64(cuSeqlen, tokenCoreBudget));
 
     int64_t numCores = static_cast<int64_t>(coreNum);
