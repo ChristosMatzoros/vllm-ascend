@@ -21,55 +21,104 @@ namespace optiling::causal_conv1d_host {
 
 using namespace Ops::Transformer::OpTiling;
 
-inline DimTileChoice ChooseCanonicalUpdateBaseDimChoice(gert::TilingContext *context, int64_t batch, int64_t dim,
-                                                        int64_t seqLength, uint32_t coreNum)
-{
-    constexpr int64_t kMaxChannelsPerTile = MAX_DIM_TILE_SIZE;
-    constexpr int64_t kMinChannelsPerTile = 128;                // Number of vector lanes in FP16 / BF16
+// Number of vector lanes for fp16/bf16; channel tiles are rounded up to a multiple of
+// this so that every tile (except possibly the last) is a full, alignment-friendly width.
+constexpr int64_t MIN_CHANNELS_PER_TILE = 128;
 
-    if (dim <= 0 || batch <= 0 || coreNum == 0) {
+// The UB budget actually available for a channel tile, derived from the real per-chip UB
+// size queried at tiling time (falls back to MAX_DIM_TILE_SIZE, the kernel's compiled
+// buffer width, whichever is smaller -- the kernel's ring/calc buffers are fixed-size at
+// compile time, so baseDim can never exceed that regardless of how much UB the chip has).
+inline int64_t ComputeUbLimitedMaxChannelsPerTile(uint64_t ubSize)
+{
+    if (ubSize <= static_cast<uint64_t>(FN_UB_RESERVED_BYTES)) {
+        return 0;
+    }
+
+    const int64_t bytesPerElem = (RING_SLOT_CNT * static_cast<int64_t>(sizeof(float))) + (FN_OUT_SLOT_CNT * BF16_FP16_ELEM_BYTES) +
+                                 (FN_CALC_FP32_SLOT_CNT * static_cast<int64_t>(sizeof(float)));
+    const int64_t budgetBytes = static_cast<int64_t>(ubSize) - FN_UB_RESERVED_BYTES;
+    const int64_t ubLimitedBaseDim = AlignDownInt64(budgetBytes / bytesPerElem, DIM_ALIGN_ELEMS);
+    return std::min<int64_t>(MAX_DIM_TILE_SIZE, ubLimitedBaseDim);
+}
+
+// Channel-tile (baseDim) selection, ported from sgl-kernel-npu's `tiling_causal_conv1d`
+// (ChristosMatzoros/sgl-kernel-npu, causal-conv1d-tiling branch,
+// csrc/causal_conv1d/op_host/causal_conv1d.cpp): pick the largest per-tile channel width
+// (rounded to a MIN_CHANNELS_PER_TILE-lane multiple) that still fits inside the UB
+// budget, using the fewest tiles needed to cover `dim`. This selection is independent of
+// coreNum/batch by design -- in both the reference kernel and this one, any parallelism
+// left over after channel-tiling is filled by splitting the token/sequence axis instead
+// (see ChooseFnTokenBlockChoice below), so over-splitting channels here would only add
+// needless per-tile overhead (extra weight/bias reloads).
+inline DimTileChoice ChooseChannelTileChoice(int64_t dim, int64_t maxChannelsPerTile)
+{
+    if (dim <= 0 || maxChannelsPerTile <= 0) {
         return {};
     }
 
-    double bestWork = std::numeric_limits<double>::infinity();
-    int64_t channelsPerTile = kMinChannelsPerTile;
+    int64_t numChannels = CeilDivInt64(dim, maxChannelsPerTile);
+    int64_t channelsPerTile = CeilDivInt64(dim / numChannels, MIN_CHANNELS_PER_TILE) * MIN_CHANNELS_PER_TILE;
+    numChannels = CeilDivInt64(dim, channelsPerTile);
+
+    DimTileChoice result;
+    result.baseDim = channelsPerTile;
+    result.baseDimCnt = numChannels;
+    result.gridSize = numChannels;
+    return result;
+}
+
+// Canonical/update (decode) mode has no sequence-splitting kernel path: each grid task
+// serially processes the *whole* per-request token window in one shot (see
+// ProcessDefaultByWindowMode in op_kernel/causal_conv1d.h). So unlike Fn mode there is no
+// second axis available to soak up leftover core parallelism once the channel axis has
+// been tiled -- the channel axis is the only tunable knob. We therefore fold both roles
+// (fitting the UB budget *and* filling idle cores) into one search over candidate tile
+// widths `d`, scored with the same depth * work principle as the reference tiling
+// (ChristosMatzoros/sgl-kernel-npu tiling_causal_conv1d): `depth` is how many sequential
+// grid-waves a core must execute, and `work` approximates the cost of one wave (compute
+// proportional to seqLength * d, plus a fixed per-wave reload overhead proportional to
+// the conv width, mirroring the reference's own "+ width" per-chunk overhead term).
+inline DimTileChoice ChooseCanonicalUpdateBaseDimChoice(gert::TilingContext *context, int64_t batch, int64_t dim,
+                                                        int64_t seqLength, int64_t width, uint64_t ubSize,
+                                                        uint32_t coreNum)
+{
+    const int64_t maxChannelsPerTile = ComputeUbLimitedMaxChannelsPerTile(ubSize);
+    if (dim <= 0 || batch <= 0 || coreNum == 0 || maxChannelsPerTile <= 0) {
+        return {};
+    }
+    const int64_t seqLen = std::max<int64_t>(1, seqLength);
+
+    double bestScore = std::numeric_limits<double>::infinity();
+    int64_t channelsPerTile = MIN_CHANNELS_PER_TILE;
 
     auto scoreFunc = [&](int64_t d) {
-        constexpr double overhead = 10.0; 
-
-        int64_t tileNumPerCore = CeilDivInt64(batch * CeilDivInt64(dim, d), static_cast<int64_t>(coreNum));
-        double tileWork = static_cast<double>(seqLength) * static_cast<double>(d) + overhead;
-
-        double score = static_cast<double>(tileNumPerCore) * tileWork;
-        return score;
+        const int64_t tileNumPerCore = CeilDivInt64(batch * CeilDivInt64(dim, d), static_cast<int64_t>(coreNum));
+        const double tileWork = static_cast<double>(seqLen) * static_cast<double>(d) + static_cast<double>(width);
+        return static_cast<double>(tileNumPerCore) * tileWork;
     };
 
-    int64_t d = kMinChannelsPerTile;
-    while (d <= MAX_DIM_TILE_SIZE) {
-        double work = scoreFunc(d);
-        if (work <= bestWork) {
-            bestWork = work;
+    int64_t d = MIN_CHANNELS_PER_TILE;
+    while (d <= maxChannelsPerTile) {
+        const double score = scoreFunc(d);
+        if (score <= bestScore) {
+            bestScore = score;
             channelsPerTile = d;
         }
 
-        int64_t k = CeilDivInt64(dim, d);
-        if (k <= 1) break;
-
-        d = CeilDivInt64(dim, k-1);
-        d = CeilDivInt64(d, 128) * 128;
+        const int64_t k = CeilDivInt64(dim, d);
+        if (k <= 1) {
+            break;
+        }
+        int64_t next = CeilDivInt64(dim, k - 1);
+        next = CeilDivInt64(next, MIN_CHANNELS_PER_TILE) * MIN_CHANNELS_PER_TILE;
+        if (next <= d) {
+            break;
+        }
+        d = next;
     }
 
-    // // Alternative (same functionality perhaps faster code)
-    // for (int64_t d = kMinChannelsPerTile; d <= MAX_DIM_TILE_SIZE; d += kMinChannelsPerTile) {
-    //     double work = scoreFunc(d);
-    //     if (work <= bestWork) {
-    //         bestWork = work;
-    //         channelsPerTile = d;
-    //     }
-    // }
-
-    channelTiles = CeilDivInt64(dim, channelsPerTile);
-
+    const int64_t channelTiles = CeilDivInt64(dim, channelsPerTile);
     DimTileChoice result;
     result.baseDim = channelsPerTile;
     result.baseDimCnt = channelTiles;
@@ -93,88 +142,9 @@ inline int64_t ResolveFnTokenCoreBudget(int64_t baseDimCnt, FnExecutionPlan fnEx
     return tokenCoreBudget;
 }
 
-inline VarlenTokenTileChoice ChooseFnTokenBlockChoice(int64_t cuSeqlen, int64_t baseDimCnt,
-                                                      FnExecutionPlan fnExecutionPlan, uint32_t coreNum);
-
-inline int64_t ComputeFnUbLimitedBaseDim(uint64_t ubSize)
-{
-    if (ubSize <= static_cast<uint64_t>(FN_UB_RESERVED_BYTES)) {
-        return 0;
-    }
-
-    const int64_t bytesPerElem = (RING_SLOT_CNT * static_cast<int64_t>(sizeof(float))) + (FN_OUT_SLOT_CNT * BF16_FP16_ELEM_BYTES) +
-                                 (FN_CALC_FP32_SLOT_CNT * static_cast<int64_t>(sizeof(float)));
-    const int64_t budgetBytes = static_cast<int64_t>(ubSize) - FN_UB_RESERVED_BYTES;
-    const int64_t ubLimitedBaseDim = AlignDownInt64(budgetBytes / bytesPerElem, DIM_ALIGN_ELEMS);
-    return std::min<int64_t>(MAX_DIM_TILE_SIZE, ubLimitedBaseDim);
-}
-
-inline DimTileChoice ChooseFnTokenFirstBaseDimChoice(int64_t dim)
-{
-    if (dim <= 0 || dim > MAX_DIM_TILE_SIZE) {
-        return {};
-    }
-    DimTileChoice choice;
-    choice.baseDim = dim;
-    choice.baseDimCnt = 1;
-    choice.gridSize = 1;
-    return choice;
-}
-
-inline DimTileChoice ChooseFnTokenDimCoSplitBaseDimChoice(gert::TilingContext *context, int64_t dim, uint64_t ubSize,
-                                                          uint32_t coreNum)
-{
-    if (dim <= 0) {
-        return {};
-    }
-
-    const int64_t ubLimitedBaseDim = ComputeFnUbLimitedBaseDim(ubSize);
-    if (ubLimitedBaseDim <= 0) {
-        OP_LOGD(context, "FnDimCoSplit: UB budget is too small to form a valid baseDim.");
-        return {};
-    }
-
-    DimTileChoice result;
-    result.baseDim = ubLimitedBaseDim;
-    result.baseDimCnt = CeilDivInt64(dim, result.baseDim);
-    result.gridSize = result.baseDimCnt;
-
-    if (coreNum == 0 || result.baseDimCnt <= 1 || result.baseDimCnt >= static_cast<int64_t>(coreNum) ||
-        (coreNum % result.baseDimCnt == 0)) {
-        OP_LOGD(context,
-                "FnDimCoSplit: dim[%ld], ubLimitedBaseDim[%ld], baseDimCnt[%ld], coreNum[%u], adjusted[%d].", dim,
-                result.baseDim, result.baseDimCnt, coreNum, 0);
-        return result;
-    }
-
-    int64_t adjustedBaseDimCnt = result.baseDimCnt;
-    while (adjustedBaseDimCnt < static_cast<int64_t>(coreNum) && (coreNum % adjustedBaseDimCnt != 0)) {
-        ++adjustedBaseDimCnt;
-    }
-
-    if (adjustedBaseDimCnt >= static_cast<int64_t>(coreNum)) {
-        OP_LOGD(context,
-                "FnDimCoSplit: keep baseDimCnt[%ld] because no divisible adjustment exists under coreNum[%u].",
-                result.baseDimCnt, coreNum);
-        return result;
-    }
-
-    const int64_t adjustedBaseDim = AlignUpInt64(CeilDivInt64(dim, adjustedBaseDimCnt), DIM_ALIGN_ELEMS);
-    if (adjustedBaseDim <= 0 || adjustedBaseDim > ubLimitedBaseDim || adjustedBaseDim > MAX_DIM_TILE_SIZE) {
-        OP_LOGD(context,
-                "FnDimCoSplit: rejected adjusted baseDim[%ld] with baseDimCnt[%ld], ubLimitedBaseDim[%ld].",
-                adjustedBaseDim, adjustedBaseDimCnt, ubLimitedBaseDim);
-        return result;
-    }
-
-    result.baseDim = adjustedBaseDim;
-    result.baseDimCnt = CeilDivInt64(dim, result.baseDim);
-    result.gridSize = result.baseDimCnt;
-    OP_LOGD(context,
-            "FnDimCoSplit: dim[%ld], ubLimitedBaseDim[%ld], adjustedBaseDim[%ld], baseDimCnt[%ld], coreNum[%u].",
-            dim, ubLimitedBaseDim, result.baseDim, result.baseDimCnt, coreNum);
-    return result;
-}
+inline VarlenTokenTileChoice ChooseFnTokenBlockChoice(int64_t cuSeqlen, int64_t batch, int64_t width,
+                                                      int64_t baseDimCnt, FnExecutionPlan fnExecutionPlan,
+                                                      uint32_t coreNum);
 
 inline TokenCoreMappingChoice BuildFnTokenCoreMappingChoice(int64_t tokenBlockCnt, int64_t baseDimCnt,
                                                             FnExecutionPlan fnExecutionPlan, uint32_t coreNum)
@@ -242,7 +212,8 @@ inline VarlenTokenTileChoice ChooseUnifiedFnTokenBlockPlan(gert::TilingContext *
         return tokenBlockChoice;
     }
 
-    tokenBlockChoice = ChooseFnTokenBlockChoice(tiling.cuSeqlen, baseDimChoice.baseDimCnt, fnExecutionPlan, coreNum);
+    tokenBlockChoice = ChooseFnTokenBlockChoice(tiling.cuSeqlen, tiling.batch, tiling.width, baseDimChoice.baseDimCnt,
+                                                fnExecutionPlan, coreNum);
 
     OP_LOGD(context,
             "FnTokenTile(plan=%ld): cuSeqlen[%ld], baseDimCnt[%ld], tokenBlockSize[%ld], "
@@ -252,18 +223,57 @@ inline VarlenTokenTileChoice ChooseUnifiedFnTokenBlockPlan(gert::TilingContext *
     return tokenBlockChoice;
 }
 
-inline VarlenTokenTileChoice ChooseFnTokenBlockChoice(int64_t cuSeqlen, int64_t baseDimCnt,
-                                                      FnExecutionPlan fnExecutionPlan, uint32_t coreNum)
+// Token/sequence-axis splitting for Fn mode, ported from sgl-kernel-npu's
+// `tiling_causal_conv1d` seqChunks search. The reference fixes channelsPerTile first
+// (see ChooseChannelTileChoice) and then greedily searches for the chunk count that
+// minimizes depth * (tokens + width), where `depth` is how many sequential grid-waves a
+// core needs and `tokens` is the per-chunk token count -- i.e. it balances "more chunks
+// means shorter, cheaper waves" against "more chunks means more waves". We reuse that
+// exact scoring here, applied to the flattened cuSeqlen axis vllm-ascend already tiles
+// (tokenBlockSize/tokenBlockCnt), using the average per-request length
+// (`cuSeqlen / batch`, the same varlen approximation the reference itself uses) as the
+// representative sequence length to split.
+//
+// One safety clamp is required beyond the reference: vllm-ascend's fn kernel indexes
+// tasks directly by blockIdx with no grid-stride loop (see ResolveFnDirectBlockTask), so
+// tokenBlockCnt must never exceed tokenCoreBudget regardless of what the score search
+// prefers -- unlike the reference kernel, there is no fallback loop to pick up tasks
+// beyond the launched blockDim.
+inline VarlenTokenTileChoice ChooseFnTokenBlockChoice(int64_t cuSeqlen, int64_t batch, int64_t width,
+                                                      int64_t baseDimCnt, FnExecutionPlan fnExecutionPlan,
+                                                      uint32_t coreNum)
 {
     VarlenTokenTileChoice tokenBlockChoice;
     const int64_t tokenCoreBudget = ResolveFnTokenCoreBudget(baseDimCnt, fnExecutionPlan, coreNum);
-    if (cuSeqlen <= 0 || tokenCoreBudget <= 0) {
+    if (cuSeqlen <= 0 || tokenCoreBudget <= 0 || batch <= 0) {
         return tokenBlockChoice;
     }
 
+    // Reference's own varlen approximation: avgSeqLen = x.size(0) / batch (floor).
+    const int64_t avgSeqLen = std::max<int64_t>(1, cuSeqlen / batch);
+    // Hard safety floor guaranteeing tokenBlockCnt <= tokenCoreBudget (see function doc).
+    const int64_t minBlockSize = std::max<int64_t>(1, CeilDivInt64(cuSeqlen, tokenCoreBudget));
+
+    double bestScore = std::numeric_limits<double>::infinity();
+    int64_t bestBlockSize = minBlockSize;
+    for (int64_t numChunks = 1; numChunks <= avgSeqLen; ++numChunks) {
+        const int64_t blockSize = std::max<int64_t>(1, CeilDivInt64(avgSeqLen, numChunks));
+        const int64_t blockCnt = CeilDivInt64(cuSeqlen, blockSize);
+        const int64_t depth = CeilDivInt64(blockCnt, tokenCoreBudget);
+        const double work = static_cast<double>(blockSize + width);
+        const double score = static_cast<double>(depth) * work;
+        if (score < bestScore) {
+            bestScore = score;
+            bestBlockSize = blockSize;
+        }
+        if (blockSize <= 1) {
+            break;
+        }
+    }
+    bestBlockSize = std::max<int64_t>(bestBlockSize, minBlockSize);
+
     tokenBlockChoice.enabled = true;
-    const int64_t idealBlockSize = CeilDivInt64(cuSeqlen, tokenCoreBudget);
-    tokenBlockChoice.tokenBlockSize = (idealBlockSize > 0) ? idealBlockSize : 1;
+    tokenBlockChoice.tokenBlockSize = bestBlockSize;
     tokenBlockChoice.tokenBlockCnt = CeilDivInt64(cuSeqlen, tokenBlockChoice.tokenBlockSize);
     tokenBlockChoice.gridSize = tokenBlockChoice.tokenBlockCnt * baseDimCnt;
     return tokenBlockChoice;
@@ -278,21 +288,16 @@ inline FnHostPlan ChooseFnHostPlan(gert::TilingContext *context, const CausalCon
         return plan;
     }
 
-    if (tiling.dim <= MAX_DIM_TILE_SIZE) {
-        plan.caseKind = FN_TILING_CASE_TOKEN_FIRST;
-        plan.executionPlan = FN_EXECUTION_PLAN_CUTBS;
-        plan.baseDimChoice = ChooseFnTokenFirstBaseDimChoice(tiling.dim);
-    } else {
-        plan.caseKind = FN_TILING_CASE_TOKEN_DIM_CO_SPLIT;
-        plan.executionPlan = FN_EXECUTION_PLAN_CUTBSD;
-        plan.baseDimChoice = ChooseFnTokenDimCoSplitBaseDimChoice(context, tiling.dim, ubSize, coreNum);
-    }
-
+    const int64_t maxChannelsPerTile = ComputeUbLimitedMaxChannelsPerTile(ubSize);
+    plan.baseDimChoice = ChooseChannelTileChoice(tiling.dim, maxChannelsPerTile);
     if (plan.baseDimChoice.baseDim <= 0 || plan.baseDimChoice.baseDimCnt <= 0) {
         return {};
     }
-
     plan.baseDimChoice.gridSize = tiling.batch * plan.baseDimChoice.baseDimCnt;
+    plan.executionPlan = static_cast<FnExecutionPlan>(ResolveFnExecutionPlan(plan.baseDimChoice.baseDimCnt));
+    plan.caseKind =
+        (plan.baseDimChoice.baseDimCnt <= 1) ? FN_TILING_CASE_TOKEN_FIRST : FN_TILING_CASE_TOKEN_DIM_CO_SPLIT;
+
     plan.tokenBlockChoice =
         ChooseUnifiedFnTokenBlockPlan(context, tiling, plan.baseDimChoice, plan.executionPlan, coreNum);
     if (!plan.tokenBlockChoice.enabled || plan.tokenBlockChoice.tokenBlockSize <= 0 ||
