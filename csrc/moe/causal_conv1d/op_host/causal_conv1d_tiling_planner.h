@@ -16,6 +16,7 @@
 #include "../op_kernel/causal_conv1d_tiling_data.h"
 
 #include <limits>
+#include <numeric>
 
 namespace optiling::causal_conv1d_host {
 
@@ -71,8 +72,9 @@ inline int64_t ResolveFnTokenCoreBudget(int64_t baseDimCnt, FnExecutionPlan fnEx
     return tokenCoreBudget;
 }
 
-inline VarlenTokenTileChoice ChooseFnTokenBlockChoice(int64_t cuSeqlen, int64_t baseDimCnt,
-                                                      FnExecutionPlan fnExecutionPlan, uint32_t coreNum);
+inline VarlenTokenTileChoice ChooseFnTokenBlockChoice(int64_t cuSeqlen, int64_t batch, int64_t width,
+                                                      int64_t baseDimCnt, FnExecutionPlan fnExecutionPlan,
+                                                      uint32_t coreNum);
 
 inline TokenCoreMappingChoice BuildFnTokenCoreMappingChoice(int64_t tokenBlockCnt, int64_t baseDimCnt,
                                                             FnExecutionPlan fnExecutionPlan, uint32_t coreNum)
@@ -140,7 +142,8 @@ inline VarlenTokenTileChoice ChooseUnifiedFnTokenBlockPlan(gert::TilingContext *
         return tokenBlockChoice;
     }
 
-    tokenBlockChoice = ChooseFnTokenBlockChoice(tiling.cuSeqlen, baseDimChoice.baseDimCnt, fnExecutionPlan, coreNum);
+    tokenBlockChoice = ChooseFnTokenBlockChoice(tiling.cuSeqlen, tiling.batch, tiling.width, baseDimChoice.baseDimCnt,
+                                                fnExecutionPlan, coreNum);
 
     OP_LOGD(context,
             "FnTokenTile(plan=%ld): cuSeqlen[%ld], baseDimCnt[%ld], tokenBlockSize[%ld], "
@@ -150,18 +153,48 @@ inline VarlenTokenTileChoice ChooseUnifiedFnTokenBlockPlan(gert::TilingContext *
     return tokenBlockChoice;
 }
 
-inline VarlenTokenTileChoice ChooseFnTokenBlockChoice(int64_t cuSeqlen, int64_t baseDimCnt,
-                                                      FnExecutionPlan fnExecutionPlan, uint32_t coreNum)
+inline VarlenTokenTileChoice ChooseFnTokenBlockChoice(int64_t cuSeqlen, int64_t batch, int64_t width,
+                                                      int64_t baseDimCnt, FnExecutionPlan fnExecutionPlan,
+                                                      uint32_t coreNum)
 {
     VarlenTokenTileChoice tokenBlockChoice;
     const int64_t tokenCoreBudget = ResolveFnTokenCoreBudget(baseDimCnt, fnExecutionPlan, coreNum);
-    if (cuSeqlen <= 0 || tokenCoreBudget <= 0) {
+    if (cuSeqlen <= 0 || tokenCoreBudget <= 0 || batch <= 0) {
         return tokenBlockChoice;
     }
 
-    const int64_t idealBlockSize = CeilDivInt64(cuSeqlen, tokenCoreBudget);
+    const int64_t avgSeqLen = std::max<int64_t>(1, cuSeqlen / batch);
+    // Hard safety floor guaranteeing tokenBlockCnt <= tokenCoreBudget (see function doc).
+    const int64_t minBlockSize = std::max<int64_t>(1, CeilDivInt64(cuSeqlen, tokenCoreBudget));
+
+    int64_t numCores = static_cast<int64_t>(coreNum);
+    int64_t batchReduced = batch;
+    const int64_t gcdCoreBatch = std::gcd(numCores, batchReduced);
+    if (gcdCoreBatch > 0) {
+        numCores /= gcdCoreBatch;
+        batchReduced /= gcdCoreBatch;
+    }
+
+    const int64_t depthNumerator = batchReduced * baseDimCnt;
+    const int64_t gcdCoreChannels = std::gcd(numCores, baseDimCnt);
+    const int64_t uppBnd = (gcdCoreChannels > 0) ? (numCores / gcdCoreChannels) : 1;
+
+    double bestScore = std::numeric_limits<double>::infinity();
+    int64_t bestBlockSize = minBlockSize;
+    for (int64_t numChunks = 1; numChunks <= uppBnd; ++numChunks) {
+        const int64_t depth = CeilDivInt64(depthNumerator * numChunks, numCores);
+        const int64_t tokens = CeilDivInt64(avgSeqLen, numChunks);
+        const double work = static_cast<double>(tokens + width);
+        const double score = static_cast<double>(depth) * work;
+        if (score < bestScore) {
+            bestScore = score;
+            bestBlockSize = std::max<int64_t>(1, CeilDivInt64(avgSeqLen, numChunks));
+        }
+    }
+    bestBlockSize = std::max<int64_t>(bestBlockSize, minBlockSize);
+
     tokenBlockChoice.enabled = true;
-    tokenBlockChoice.tokenBlockSize = std::max<int64_t>(1, idealBlockSize);
+    tokenBlockChoice.tokenBlockSize = bestBlockSize;
     tokenBlockChoice.tokenBlockCnt = CeilDivInt64(cuSeqlen, tokenBlockChoice.tokenBlockSize);
     tokenBlockChoice.gridSize = tokenBlockChoice.tokenBlockCnt * baseDimCnt;
     return tokenBlockChoice;
