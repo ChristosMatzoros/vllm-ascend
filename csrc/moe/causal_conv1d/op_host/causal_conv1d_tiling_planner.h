@@ -15,62 +15,45 @@
 #include "causal_conv1d_tiling_utils.h"
 #include "../op_kernel/causal_conv1d_tiling_data.h"
 
+#include <limits>
+#include <numeric>
+
 namespace optiling::causal_conv1d_host {
 
 using namespace Ops::Transformer::OpTiling;
 
+// Number of vector lanes for fp16/bf16; channel tiles are rounded up to a multiple of
+// this so that every tile (except possibly the last) is a full, alignment-friendly width.
+// Must divide MAX_DIM_TILE_SIZE
+constexpr int64_t MIN_CHANNELS_PER_TILE = 128;
+
+inline DimTileChoice ChooseChannelTileChoice(int64_t dim)
+{
+    if (dim <= 0) {
+        return {};
+    }
+
+    int64_t numChannels = CeilDivInt64(dim, MAX_DIM_TILE_SIZE);
+    int64_t channelsPerTile = CeilDivInt64(CeilDivInt64(dim, numChannels), MIN_CHANNELS_PER_TILE) * MIN_CHANNELS_PER_TILE;
+    numChannels = CeilDivInt64(dim, channelsPerTile);
+
+    DimTileChoice result;
+    result.baseDim = channelsPerTile;
+    result.baseDimCnt = numChannels;
+    result.gridSize = numChannels;
+    return result;
+}
+
 inline DimTileChoice ChooseCanonicalUpdateBaseDimChoice(gert::TilingContext *context, int64_t batch, int64_t dim,
                                                         uint32_t coreNum)
 {
-    const int64_t candidates[] = {3072, 2048, 1024, 512, 384, 192};
-
-    auto chooseOnce = [&](bool requireExactDiv) -> DimTileChoice {
-        DimTileChoice bestOver;
-        int64_t bestOverGap = std::numeric_limits<int64_t>::max();
-        DimTileChoice bestUnder;
-
-        for (int64_t baseDim : candidates) {
-            if (baseDim <= 0) {
-                continue;
-            }
-            if (requireExactDiv && (dim % baseDim != 0)) {
-                continue;
-            }
-
-            const int64_t baseDimCnt = requireExactDiv ? (dim / baseDim) : CeilDivInt64(dim, baseDim);
-            const int64_t gridSize = batch * baseDimCnt;
-            if (gridSize <= 0) {
-                continue;
-            }
-
-            OP_LOGD(context,
-                    "DimTile(update) candidate[%s]: baseDim[%ld], baseDimCnt[%ld], gridSize[%ld], coreNum[%u].",
-                    requireExactDiv ? "exact" : "tail", baseDim, baseDimCnt, gridSize, coreNum);
-            if (gridSize >= static_cast<int64_t>(coreNum)) {
-                const int64_t gap = gridSize - static_cast<int64_t>(coreNum);
-                if (gap < bestOverGap) {
-                    // bestOver = {baseDim, baseDimCnt, gridSize};
-                    bestOver.baseDim = baseDim;
-                    bestOver.baseDimCnt = baseDimCnt;
-                    bestOver.gridSize = gridSize;
-                    bestOverGap = gap;
-                }
-            } else if (gridSize > bestUnder.gridSize ||
-                       (gridSize == bestUnder.gridSize && baseDim < bestUnder.baseDim)) {
-                // bestUnder = {baseDim, baseDimCnt, gridSize};
-                bestUnder.baseDim = baseDim;
-                bestUnder.baseDimCnt = baseDimCnt;
-                bestUnder.gridSize = gridSize;
-            }
-        }
-
-        return (bestOver.baseDim != 0) ? bestOver : bestUnder;
-    };
-
-    DimTileChoice result = chooseOnce(true);
-    if (result.baseDim == 0) {
-        result = chooseOnce(false);
+    if (dim <= 0 || batch <= 0 || coreNum == 0) {
+        return {};
     }
+    
+    DimTileChoice result = ChooseChannelTileChoice(dim);
+    result.gridSize *= batch;
+
     OP_LOGD(context, "DimTile(update) chosen: baseDim[%ld], baseDimCnt[%ld], gridSize[%ld].", result.baseDim,
             result.baseDimCnt, result.gridSize);
     return result;
@@ -89,88 +72,9 @@ inline int64_t ResolveFnTokenCoreBudget(int64_t baseDimCnt, FnExecutionPlan fnEx
     return tokenCoreBudget;
 }
 
-inline VarlenTokenTileChoice ChooseFnTokenBlockChoice(int64_t cuSeqlen, int64_t baseDimCnt,
-                                                      FnExecutionPlan fnExecutionPlan, uint32_t coreNum);
-
-inline int64_t ComputeFnUbLimitedBaseDim(uint64_t ubSize)
-{
-    if (ubSize <= static_cast<uint64_t>(FN_UB_RESERVED_BYTES)) {
-        return 0;
-    }
-
-    const int64_t bytesPerElem = (RING_SLOT_CNT * static_cast<int64_t>(sizeof(float))) + (FN_OUT_SLOT_CNT * BF16_FP16_ELEM_BYTES) +
-                                 (FN_CALC_FP32_SLOT_CNT * static_cast<int64_t>(sizeof(float)));
-    const int64_t budgetBytes = static_cast<int64_t>(ubSize) - FN_UB_RESERVED_BYTES;
-    const int64_t ubLimitedBaseDim = AlignDownInt64(budgetBytes / bytesPerElem, DIM_ALIGN_ELEMS);
-    return std::min<int64_t>(MAX_DIM_TILE_SIZE, ubLimitedBaseDim);
-}
-
-inline DimTileChoice ChooseFnTokenFirstBaseDimChoice(int64_t dim)
-{
-    if (dim <= 0 || dim > MAX_DIM_TILE_SIZE) {
-        return {};
-    }
-    DimTileChoice choice;
-    choice.baseDim = dim;
-    choice.baseDimCnt = 1;
-    choice.gridSize = 1;
-    return choice;
-}
-
-inline DimTileChoice ChooseFnTokenDimCoSplitBaseDimChoice(gert::TilingContext *context, int64_t dim, uint64_t ubSize,
-                                                          uint32_t coreNum)
-{
-    if (dim <= 0) {
-        return {};
-    }
-
-    const int64_t ubLimitedBaseDim = ComputeFnUbLimitedBaseDim(ubSize);
-    if (ubLimitedBaseDim <= 0) {
-        OP_LOGD(context, "FnDimCoSplit: UB budget is too small to form a valid baseDim.");
-        return {};
-    }
-
-    DimTileChoice result;
-    result.baseDim = ubLimitedBaseDim;
-    result.baseDimCnt = CeilDivInt64(dim, result.baseDim);
-    result.gridSize = result.baseDimCnt;
-
-    if (coreNum == 0 || result.baseDimCnt <= 1 || result.baseDimCnt >= static_cast<int64_t>(coreNum) ||
-        (coreNum % result.baseDimCnt == 0)) {
-        OP_LOGD(context,
-                "FnDimCoSplit: dim[%ld], ubLimitedBaseDim[%ld], baseDimCnt[%ld], coreNum[%u], adjusted[%d].", dim,
-                result.baseDim, result.baseDimCnt, coreNum, 0);
-        return result;
-    }
-
-    int64_t adjustedBaseDimCnt = result.baseDimCnt;
-    while (adjustedBaseDimCnt < static_cast<int64_t>(coreNum) && (coreNum % adjustedBaseDimCnt != 0)) {
-        ++adjustedBaseDimCnt;
-    }
-
-    if (adjustedBaseDimCnt >= static_cast<int64_t>(coreNum)) {
-        OP_LOGD(context,
-                "FnDimCoSplit: keep baseDimCnt[%ld] because no divisible adjustment exists under coreNum[%u].",
-                result.baseDimCnt, coreNum);
-        return result;
-    }
-
-    const int64_t adjustedBaseDim = AlignUpInt64(CeilDivInt64(dim, adjustedBaseDimCnt), DIM_ALIGN_ELEMS);
-    if (adjustedBaseDim <= 0 || adjustedBaseDim > ubLimitedBaseDim || adjustedBaseDim > MAX_DIM_TILE_SIZE) {
-        OP_LOGD(context,
-                "FnDimCoSplit: rejected adjusted baseDim[%ld] with baseDimCnt[%ld], ubLimitedBaseDim[%ld].",
-                adjustedBaseDim, adjustedBaseDimCnt, ubLimitedBaseDim);
-        return result;
-    }
-
-    result.baseDim = adjustedBaseDim;
-    result.baseDimCnt = CeilDivInt64(dim, result.baseDim);
-    result.gridSize = result.baseDimCnt;
-    OP_LOGD(context,
-            "FnDimCoSplit: dim[%ld], ubLimitedBaseDim[%ld], adjustedBaseDim[%ld], baseDimCnt[%ld], coreNum[%u].",
-            dim, ubLimitedBaseDim, result.baseDim, result.baseDimCnt, coreNum);
-    return result;
-}
+inline VarlenTokenTileChoice ChooseFnTokenBlockChoice(int64_t cuSeqlen, int64_t batch, int64_t width,
+                                                      int64_t baseDimCnt, FnExecutionPlan fnExecutionPlan,
+                                                      uint32_t coreNum);
 
 inline TokenCoreMappingChoice BuildFnTokenCoreMappingChoice(int64_t tokenBlockCnt, int64_t baseDimCnt,
                                                             FnExecutionPlan fnExecutionPlan, uint32_t coreNum)
@@ -238,7 +142,8 @@ inline VarlenTokenTileChoice ChooseUnifiedFnTokenBlockPlan(gert::TilingContext *
         return tokenBlockChoice;
     }
 
-    tokenBlockChoice = ChooseFnTokenBlockChoice(tiling.cuSeqlen, baseDimChoice.baseDimCnt, fnExecutionPlan, coreNum);
+    tokenBlockChoice = ChooseFnTokenBlockChoice(tiling.cuSeqlen, tiling.batch, tiling.width, baseDimChoice.baseDimCnt,
+                                                fnExecutionPlan, coreNum);
 
     OP_LOGD(context,
             "FnTokenTile(plan=%ld): cuSeqlen[%ld], baseDimCnt[%ld], tokenBlockSize[%ld], "
@@ -248,18 +153,48 @@ inline VarlenTokenTileChoice ChooseUnifiedFnTokenBlockPlan(gert::TilingContext *
     return tokenBlockChoice;
 }
 
-inline VarlenTokenTileChoice ChooseFnTokenBlockChoice(int64_t cuSeqlen, int64_t baseDimCnt,
-                                                      FnExecutionPlan fnExecutionPlan, uint32_t coreNum)
+inline VarlenTokenTileChoice ChooseFnTokenBlockChoice(int64_t cuSeqlen, int64_t batch, int64_t width,
+                                                      int64_t baseDimCnt, FnExecutionPlan fnExecutionPlan,
+                                                      uint32_t coreNum)
 {
     VarlenTokenTileChoice tokenBlockChoice;
     const int64_t tokenCoreBudget = ResolveFnTokenCoreBudget(baseDimCnt, fnExecutionPlan, coreNum);
-    if (cuSeqlen <= 0 || tokenCoreBudget <= 0) {
+    if (cuSeqlen <= 0 || tokenCoreBudget <= 0 || batch <= 0) {
         return tokenBlockChoice;
     }
 
+    const int64_t avgSeqLen = std::max<int64_t>(1, cuSeqlen / batch);
+    // Hard safety floor guaranteeing tokenBlockCnt <= tokenCoreBudget (kernel assumption).
+    const int64_t minBlockSize = std::max<int64_t>(1, CeilDivInt64(cuSeqlen, tokenCoreBudget));
+
+    int64_t numCores = static_cast<int64_t>(coreNum);
+    int64_t batchReduced = batch;
+    const int64_t gcdCoreBatch = std::gcd(numCores, batchReduced);
+    if (gcdCoreBatch > 0) {
+        numCores /= gcdCoreBatch;
+        batchReduced /= gcdCoreBatch;
+    }
+
+    const int64_t depthNumerator = batchReduced * baseDimCnt;
+    const int64_t gcdCoreChannels = std::gcd(numCores, baseDimCnt);
+    const int64_t uppBnd = (gcdCoreChannels > 0) ? (numCores / gcdCoreChannels) : 1;
+
+    double bestScore = std::numeric_limits<double>::infinity();
+    int64_t bestBlockSize = minBlockSize;
+    for (int64_t numChunks = 1; numChunks <= uppBnd; ++numChunks) {
+        const int64_t depth = CeilDivInt64(depthNumerator * numChunks, numCores);
+        const int64_t tokens = CeilDivInt64(avgSeqLen, numChunks);
+        const double work = static_cast<double>(tokens + width);
+        const double score = static_cast<double>(depth) * work;
+        if (score < bestScore) {
+            bestScore = score;
+            bestBlockSize = std::max<int64_t>(1, CeilDivInt64(avgSeqLen, numChunks));
+        }
+    }
+    bestBlockSize = std::max<int64_t>(bestBlockSize, minBlockSize);
+
     tokenBlockChoice.enabled = true;
-    const int64_t idealBlockSize = CeilDivInt64(cuSeqlen, tokenCoreBudget);
-    tokenBlockChoice.tokenBlockSize = (idealBlockSize > 0) ? idealBlockSize : 1;
+    tokenBlockChoice.tokenBlockSize = bestBlockSize;
     tokenBlockChoice.tokenBlockCnt = CeilDivInt64(cuSeqlen, tokenBlockChoice.tokenBlockSize);
     tokenBlockChoice.gridSize = tokenBlockChoice.tokenBlockCnt * baseDimCnt;
     return tokenBlockChoice;
@@ -274,21 +209,20 @@ inline FnHostPlan ChooseFnHostPlan(gert::TilingContext *context, const CausalCon
         return plan;
     }
 
-    if (tiling.dim <= MAX_DIM_TILE_SIZE) {
-        plan.caseKind = FN_TILING_CASE_TOKEN_FIRST;
-        plan.executionPlan = FN_EXECUTION_PLAN_CUTBS;
-        plan.baseDimChoice = ChooseFnTokenFirstBaseDimChoice(tiling.dim);
-    } else {
-        plan.caseKind = FN_TILING_CASE_TOKEN_DIM_CO_SPLIT;
-        plan.executionPlan = FN_EXECUTION_PLAN_CUTBSD;
-        plan.baseDimChoice = ChooseFnTokenDimCoSplitBaseDimChoice(context, tiling.dim, ubSize, coreNum);
-    }
-
+    plan.baseDimChoice = ChooseChannelTileChoice(tiling.dim);
     if (plan.baseDimChoice.baseDim <= 0 || plan.baseDimChoice.baseDimCnt <= 0) {
         return {};
     }
-
     plan.baseDimChoice.gridSize = tiling.batch * plan.baseDimChoice.baseDimCnt;
+
+    if (plan.baseDimChoice.baseDimCnt <= 1) {
+        plan.caseKind = FN_TILING_CASE_TOKEN_FIRST;
+        plan.executionPlan = FN_EXECUTION_PLAN_CUTBS;
+    } else {
+        plan.caseKind = FN_TILING_CASE_TOKEN_DIM_CO_SPLIT;
+        plan.executionPlan = FN_EXECUTION_PLAN_CUTBSD;
+    }
+
     plan.tokenBlockChoice =
         ChooseUnifiedFnTokenBlockPlan(context, tiling, plan.baseDimChoice, plan.executionPlan, coreNum);
     if (!plan.tokenBlockChoice.enabled || plan.tokenBlockChoice.tokenBlockSize <= 0 ||
