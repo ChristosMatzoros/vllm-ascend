@@ -24,14 +24,6 @@ enum FnExecutionPlan : int64_t {
     FN_EXECUTION_PLAN_CUTBSD = 2,
 };
 
-inline constexpr int64_t ResolveFnExecutionPlan(int64_t baseDimCnt)
-{
-    return (baseDimCnt <= 0) ? FN_EXECUTION_PLAN_INVALID
-        : (baseDimCnt <= 1) ? FN_EXECUTION_PLAN_CUTBS
-        :                     FN_EXECUTION_PLAN_CUTBSD;
-}
-
-
 struct CausalConv1dTilingData {
     int64_t dim;
     int64_t cuSeqlen;

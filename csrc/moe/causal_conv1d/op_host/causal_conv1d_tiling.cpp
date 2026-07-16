@@ -65,8 +65,7 @@
          baseDimChoice = fnHostPlan.baseDimChoice;
          fnExecutionPlan = fnHostPlan.executionPlan;
      } else {
-         baseDimChoice = ChooseCanonicalUpdateBaseDimChoice(context, tiling->batch, tiling->dim, tiling->seqLen,
-                                                            tiling->width, ubSize, coreNum);
+         baseDimChoice = ChooseCanonicalUpdateBaseDimChoice(context, tiling->batch, tiling->dim, coreNum);
      }
  
      OP_CHECK_IF(baseDimChoice.baseDim <= 0 || baseDimChoice.baseDimCnt <= 0 || baseDimChoice.gridSize <= 0,
